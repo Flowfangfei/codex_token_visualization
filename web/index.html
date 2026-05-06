@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Token Ledger</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="mark" aria-hidden="true">C</div>
+          <div>
+            <p class="eyebrow">Codex Usage</p>
+            <h1>Token Ledger</h1>
+          </div>
+        </div>
+        <div class="toolbar" aria-label="操作">
+          <button class="icon-button" id="refreshBtn" type="button" title="刷新数据" aria-label="刷新数据">
+            <span aria-hidden="true">↻</span>
+          </button>
+          <button class="primary-button" id="exportBtn" type="button">
+            <span aria-hidden="true">⬇</span>
+            <span>立即导出</span>
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section class="status-strip" aria-live="polite">
+          <div>
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">正在读取本地 JSON...</span>
+          </div>
+          <div class="source-path" id="sourcePath">codex-usage-logs/daily</div>
+        </section>
+
+        <section class="metric-grid" id="metricGrid"></section>
+
+        <section class="layout-grid">
+          <article class="panel trend-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="section-label">Daily Trend</p>
+                <h2>最近使用量</h2>
+              </div>
+              <div class="pill" id="rangePill">--</div>
+            </div>
+            <div class="chart-wrap" id="trendChart"></div>
+          </article>
+
+          <article class="panel split-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="section-label">Latest Day</p>
+                <h2>Token 构成</h2>
+              </div>
+              <div class="pill" id="latestDatePill">--</div>
+            </div>
+            <div id="breakdown"></div>
+          </article>
+        </section>
+
+        <section class="layout-grid lower-grid">
+          <article class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="section-label">Models</p>
+                <h2>模型分布</h2>
+              </div>
+            </div>
+            <div class="model-list" id="modelList"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="section-label">Snapshots</p>
+                <h2>本地快照</h2>
+              </div>
+              <div class="pill" id="fileCountPill">0 files</div>
+            </div>
+            <div class="snapshot-list" id="snapshotList"></div>
+          </article>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-label">Ledger</p>
+              <h2>每日明细</h2>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>总 Token</th>
+                  <th>输入</th>
+                  <th>缓存输入</th>
+                  <th>输出</th>
+                  <th>推理输出</th>
+                  <th>费用估算</th>
+                  <th>模型</th>
+                </tr>
+              </thead>
+              <tbody id="dailyRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <template id="metricTemplate">
+      <article class="metric-card">
+        <div class="metric-label"></div>
+        <div class="metric-value"></div>
+        <div class="metric-sub"></div>
+      </article>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

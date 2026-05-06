@@ -1,0 +1,5 @@
+codex-usage-logs/
+.npm-cache/
+verification/
+node_modules/
+.DS_Store
