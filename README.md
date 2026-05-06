@@ -29,6 +29,7 @@
 - Windows 10/11
 - Node.js 18 或更高版本
 - PowerShell
+- `@ccusage/codex`
 - 可用的 Codex 本地日志
 
 检查 Node.js：
@@ -37,6 +38,14 @@
 node --version
 npx --version
 ```
+
+检查 `@ccusage/codex`：
+
+```powershell
+npx -y @ccusage/codex@latest --help
+```
+
+说明：脚本内部使用的是 `npx -y @ccusage/codex@latest`，所以首次运行时会自动下载最新版 `@ccusage/codex`。如果你已经全局安装过也没问题，但不是必须全局安装。
 
 如果系统没有 Node.js，请先安装 Node.js LTS。
 
