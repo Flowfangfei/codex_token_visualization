@@ -397,10 +397,11 @@ async function loadUsage() {
   }
 }
 
-async function exportNow() {
+async function exportAndRefresh(source = "button") {
   els.exportBtn.disabled = true;
   els.refreshBtn.disabled = true;
-  setStatus("正在运行 ccusage 导出...");
+  const statusPrefix = source === "refresh" ? "正在导出最新数据并刷新..." : "正在运行 ccusage 导出...";
+  setStatus(statusPrefix);
   try {
     const response = await fetch("/api/export", { method: "POST" });
     const data = await response.json();
@@ -408,16 +409,17 @@ async function exportNow() {
       throw new Error(data.stderr || data.error || `HTTP ${response.status}`);
     }
     render(data.snapshot);
-    setStatus("导出完成", "ok");
+    const fileName = data.snapshot?.latestFile?.name || "当天快照";
+    setStatus(`已导出并刷新：${fileName}，当天重复刷新会覆盖同一个 JSON`, "ok");
   } catch (error) {
-    setStatus(`导出失败：${error.message}`, "error");
+    setStatus(`导出刷新失败：${error.message}`, "error");
   } finally {
     els.exportBtn.disabled = false;
     els.refreshBtn.disabled = false;
   }
 }
 
-els.refreshBtn.addEventListener("click", loadUsage);
-els.exportBtn.addEventListener("click", exportNow);
+els.refreshBtn.addEventListener("click", () => exportAndRefresh("refresh"));
+els.exportBtn.addEventListener("click", () => exportAndRefresh("export"));
 
 loadUsage();

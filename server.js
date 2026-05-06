@@ -16,6 +16,8 @@ const MIME = {
   ".svg": "image/svg+xml",
 };
 
+let exportInFlight = null;
+
 function parseArgs() {
   const index = process.argv.findIndex((arg) => arg === "--port" || arg === "-p");
   if (index !== -1 && process.argv[index + 1]) {
@@ -83,44 +85,75 @@ function latestUsageSnapshot() {
   };
 }
 
-function runExport(res) {
+function exportUsageSnapshot() {
+  if (exportInFlight) return exportInFlight;
+
   const script = path.join(ROOT, "scripts", "export-daily.ps1");
   const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
-  const child = spawn(
-    shell,
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
-    { cwd: ROOT, windowsHide: true }
-  );
 
-  let stdout = "";
-  let stderr = "";
+  exportInFlight = new Promise((resolve, reject) => {
+    const child = spawn(
+      shell,
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+      { cwd: ROOT, windowsHide: true }
+    );
 
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-  });
+    let stdout = "";
+    let stderr = "";
 
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-
-  child.on("error", (error) => {
-    sendJson(res, 500, { ok: false, error: error.message });
-  });
-
-  child.on("close", (code) => {
-    if (code !== 0) {
-      sendJson(res, 500, { ok: false, code, stdout, stderr });
-      return;
-    }
-
-    sendJson(res, 200, {
-      ok: true,
-      code,
-      stdout,
-      stderr,
-      snapshot: latestUsageSnapshot(),
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
     });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (code !== 0) {
+        const error = new Error(stderr || stdout || `ccusage export failed with exit code ${code}`);
+        error.code = code;
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+
+      resolve({
+        code,
+        stdout,
+        stderr,
+        snapshot: latestUsageSnapshot(),
+      });
+    });
+  }).finally(() => {
+    exportInFlight = null;
   });
+
+  return exportInFlight;
+}
+
+function runExport(res) {
+  exportUsageSnapshot()
+    .then((result) => {
+      sendJson(res, 200, {
+        ok: true,
+        ...result,
+      });
+    })
+    .catch((error) => {
+      sendJson(res, 500, {
+        ok: false,
+        code: error.code,
+        error: error.message,
+        stdout: error.stdout || "",
+        stderr: error.stderr || "",
+      });
+    });
 }
 
 function serveStatic(req, res) {
