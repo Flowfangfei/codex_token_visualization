@@ -329,7 +329,7 @@ function renderSnapshots(data) {
     return;
   }
 
-  files.slice(0, 6).forEach((file, index) => {
+  files.forEach((file, index) => {
     const row = document.createElement("div");
     row.className = "snapshot-row";
     row.innerHTML = `
