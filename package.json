@@ -9,6 +9,6 @@
     "task:register": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/register-daily-task.ps1"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   }
 }

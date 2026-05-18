@@ -1,13 +1,13 @@
 # Codex Token Visualization
 
-一个本地 Codex token 用量导出和可视化面板。它基于 `@ccusage/codex` 读取本机 Codex JSONL 日志，生成每日 JSON 快照，并用一个本地 WebUI 展示趋势、累计 token、缓存输入占比、费用估算、模型分布和每日明细。
+一个本地 Codex token 用量导出和可视化面板。它基于 `ccusage` 读取本机 Codex JSONL 日志，生成每日 JSON 快照，并用一个本地 WebUI 展示趋势、累计 token、缓存输入占比、费用估算、模型分布和每日明细。
 
 这个工具默认把所有运行数据保存在项目目录内，避免每天把导出文件、`npx` 缓存或临时数据写到 C 盘用户目录。
 
 ## 适合谁用
 
 - 想每天记录 Codex 本地 CLI token 消耗的人
-- 想把 `@ccusage/codex daily --json` 的结果长期保存下来的人
+- 想把 `ccusage codex daily --json` 的结果长期保存下来的人
 - 想用浏览器快速查看每日趋势、累计消耗和模型分布的人
 - 不希望日志导出文件堆到 C 盘的人
 
@@ -27,9 +27,9 @@
 需要安装：
 
 - Windows 10/11
-- Node.js 18 或更高版本
+- Node.js 22 或更高版本
 - PowerShell
-- `@ccusage/codex`
+- `ccusage`
 - 可用的 Codex 本地日志
 
 检查 Node.js：
@@ -39,15 +39,15 @@ node --version
 npx --version
 ```
 
-检查 `@ccusage/codex`：
+检查 `ccusage`：
 
 ```powershell
-npx -y @ccusage/codex@latest --help
+npx -y ccusage@latest codex daily --help
 ```
 
-说明：脚本内部使用的是 `npx -y @ccusage/codex@latest`，所以首次运行时会自动下载最新版 `@ccusage/codex`。如果你已经全局安装过也没问题，但不是必须全局安装。
+说明：脚本内部使用的是 `npx -y ccusage@latest codex daily`，所以首次运行时会自动下载最新版 `ccusage`。如果你已经全局安装过也没问题，但不是必须全局安装。
 
-如果系统没有 Node.js，请先安装 Node.js LTS。
+如果系统没有 Node.js，或版本低于 22，请先安装新版 Node.js LTS。
 
 ## 快速开始
 
@@ -164,7 +164,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1
 默认等价于：
 
 ```powershell
-npx -y @ccusage/codex@latest daily --timezone Asia/Tokyo --json
+npx -y ccusage@latest codex daily --timezone Asia/Tokyo --json
 ```
 
 但脚本额外做了几件事：
@@ -215,7 +215,7 @@ WebUI 会读取最新的 JSON 快照，并展示：
 
 页面右上角有两个操作：
 
-- 刷新图标：运行 `@ccusage/codex`，覆盖更新当天 JSON，然后重新渲染页面
+- 刷新图标：运行 `ccusage codex daily`，覆盖更新当天 JSON，然后重新渲染页面
 - “导出刷新”：和刷新图标相同，用于更明确地手动触发一次导出
 
 首次打开页面只会读取本地已有 JSON，不会自动运行导出命令。这样可以避免每次打开浏览器都启动 `npx`；需要最新数据时再手动点击刷新。
@@ -278,7 +278,7 @@ http://localhost:8790
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\open-dashboard.ps1 -Port 8787
 ```
 
-常见原因是 Node.js 没有安装，或者 `node` 不在 PATH 里。
+常见原因是 Node.js 没有安装、版本低于 22，或者 `node` 不在 PATH 里。
 
 ### 计划任务没有执行
 

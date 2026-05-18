@@ -20,7 +20,7 @@ function Test-Dashboard {
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  throw "Node.js was not found in PATH. Install Node.js or start the dashboard from a terminal where node is available."
+  throw "Node.js was not found in PATH. Install Node.js 22 or newer, or start the dashboard from a terminal where node is available."
 }
 
 if (-not (Test-Dashboard -Endpoint $ApiUrl)) {

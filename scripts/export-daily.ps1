@@ -17,6 +17,20 @@ $NpmCache = Join-Path $ProjectRoot ".npm-cache"
 New-Item -ItemType Directory -Force -Path $DailyRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $NpmCache | Out-Null
 
+$NodeVersion = (& node --version) 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $NodeVersion) {
+  throw "Node.js was not found. ccusage@latest requires Node.js 22 or newer."
+}
+
+if ($NodeVersion -notmatch "^v?(\d+)") {
+  throw "Could not determine Node.js version: $NodeVersion"
+}
+
+$NodeMajor = [int]$Matches[1]
+if ($NodeMajor -lt 22) {
+  throw "ccusage@latest requires Node.js 22 or newer. Current version: $NodeVersion"
+}
+
 if (-not $FileDate) {
   $FileDate = Get-Date -Format "yyyy-MM-dd"
 }
@@ -27,7 +41,8 @@ $env:npm_config_cache = $NpmCache
 $npxArgs = @(
   "--cache", $NpmCache,
   "-y",
-  "@ccusage/codex@latest",
+  "ccusage@latest",
+  "codex",
   "daily",
   "--timezone", $Timezone,
   "--json"
@@ -36,6 +51,7 @@ $npxArgs = @(
 Write-Host "Exporting Codex usage to: $OutputFile"
 Write-Host "Timezone: $Timezone"
 Write-Host "npm cache: $NpmCache"
+Write-Host "Command: npx --cache `"$NpmCache`" -y ccusage@latest codex daily --timezone $Timezone --json"
 
 $json = (& npx @npxArgs) -join [Environment]::NewLine
 if ($LASTEXITCODE -ne 0) {
