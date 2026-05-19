@@ -33,6 +33,18 @@ function sortDays(days) {
   return [...days].sort((a, b) => parseCcDate(a.date) - parseCcDate(b.date));
 }
 
+function formatTrendDate(value) {
+  if (!value || typeof value !== "string") return "--";
+
+  const iso = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return `${iso[2]}-${iso[3]}`;
+
+  const text = value.match(/^([A-Z][a-z]{2})\s+(\d{1,2}),\s+\d{4}$/);
+  if (text) return `${text[1]} ${Number(text[2])}`;
+
+  return value.length > 8 ? value.slice(0, 8) : value;
+}
+
 function formatCompact(value) {
   const number = Number(value) || 0;
   return new Intl.NumberFormat("zh-CN", {
@@ -192,7 +204,7 @@ function renderTrend(days) {
       text.setAttribute("x", x);
       text.setAttribute("y", height - 14);
       text.setAttribute("text-anchor", "middle");
-      text.textContent = day.date.replace(", 2026", "").replace(" ", " ");
+      text.textContent = formatTrendDate(day.date);
       svg.appendChild(text);
     }
   });
