@@ -69,6 +69,32 @@ function formatPercent(value) {
   return `${((Number(value) || 0) * 100).toFixed(1)}%`;
 }
 
+function tokenParts(usage) {
+  const input = Number(usage?.inputTokens) || 0;
+  const cached = Number(usage?.cachedInputTokens) || 0;
+  const output = Number(usage?.outputTokens) || 0;
+  const total = Number(usage?.totalTokens) || 0;
+  const separateTotal = input + cached + output;
+  const combinedTotal = input + output;
+  const tolerance = Math.max(2, total * 0.000001);
+  const usesSeparateCached =
+    cached > 0 && (cached > input || Math.abs(total - separateTotal) <= tolerance);
+
+  const nonCachedInput = usesSeparateCached ? input : Math.max(input - cached, 0);
+  const promptInput = usesSeparateCached ? input + cached : input;
+  const displayTotal =
+    total || (usesSeparateCached ? separateTotal : Math.max(combinedTotal, cached + nonCachedInput + output));
+
+  return {
+    cachedInput: cached,
+    nonCachedInput,
+    output,
+    promptInput,
+    displayTotal,
+    cacheShare: promptInput > 0 ? cached / promptInput : 0,
+  };
+}
+
 function formatBytes(bytes) {
   const value = Number(bytes) || 0;
   if (value < 1024) return `${value} B`;
@@ -114,15 +140,24 @@ function renderMetrics(days, totals) {
   const latest = days.at(-1);
   const latestTotal = Number(latest.totalTokens) || 0;
   const totalTokens = Number(totals.totalTokens) || days.reduce((sum, day) => sum + (Number(day.totalTokens) || 0), 0);
-  const inputTokens = Number(totals.inputTokens) || days.reduce((sum, day) => sum + (Number(day.inputTokens) || 0), 0);
-  const cachedTokens =
-    Number(totals.cachedInputTokens) || days.reduce((sum, day) => sum + (Number(day.cachedInputTokens) || 0), 0);
-  const cacheShare = inputTokens > 0 ? cachedTokens / inputTokens : 0;
+  const hasTotals = Number(totals.totalTokens) || Number(totals.inputTokens) || Number(totals.cachedInputTokens);
+  const totalParts = hasTotals
+    ? tokenParts(totals)
+    : days.reduce(
+        (sum, day) => {
+          const parts = tokenParts(day);
+          sum.cachedInput += parts.cachedInput;
+          sum.promptInput += parts.promptInput;
+          return sum;
+        },
+        { cachedInput: 0, promptInput: 0 }
+      );
+  const cacheShare = totalParts.promptInput > 0 ? totalParts.cachedInput / totalParts.promptInput : 0;
   const recentTotal = sumRecent(days, "totalTokens", 30);
 
   renderMetric("最新日期", formatCompact(latestTotal), `${latest.date} · ${formatCost(latest.costUSD)}`);
   renderMetric("累计 Token", formatCompact(totalTokens), `最近 30 条记录 ${formatCompact(recentTotal)}`);
-  renderMetric("缓存输入占比", formatPercent(cacheShare), `${formatCompact(cachedTokens)} cached input`);
+  renderMetric("缓存输入占比", formatPercent(cacheShare), `${formatCompact(totalParts.cachedInput)} cached input`);
   renderMetric("费用估算", formatCost(totals.costUSD), "本地 JSONL 统计，不等同订阅额度");
 }
 
@@ -246,19 +281,16 @@ function renderBreakdown(days) {
   }
 
   const latest = days.at(-1);
-  const input = Number(latest.inputTokens) || 0;
-  const cached = Number(latest.cachedInputTokens) || 0;
-  const freshInput = Math.max(input - cached, 0);
-  const output = Number(latest.outputTokens) || 0;
-  const total = Math.max(input + output, 1);
+  const parts = tokenParts(latest);
+  const total = Math.max(parts.cachedInput + parts.nonCachedInput + parts.output, 1);
   const reasoning = Number(latest.reasoningOutputTokens) || 0;
 
   els.latestDatePill.textContent = latest.date;
 
   const segments = [
-    { label: "缓存输入", value: cached, color: "var(--sage)" },
-    { label: "非缓存输入", value: freshInput, color: "var(--clay)" },
-    { label: "输出", value: output, color: "var(--teal)" },
+    { label: "缓存输入", value: parts.cachedInput, color: "var(--sage)" },
+    { label: "非缓存输入", value: parts.nonCachedInput, color: "var(--clay)" },
+    { label: "输出", value: parts.output, color: "var(--teal)" },
   ];
 
   const stack = document.createElement("div");
@@ -288,7 +320,7 @@ function renderBreakdown(days) {
 
   const note = document.createElement("div");
   note.className = "reasoning-note";
-  note.textContent = `推理输出 ${formatNumber(reasoning)} token；ccusage 的 totalTokens 按输入 + 输出统计，推理输出单独列出。`;
+  note.textContent = `推理输出 ${formatNumber(reasoning)} token；Token 构成按缓存输入、非缓存输入和输出拆分，推理输出单独列出。`;
   els.breakdown.appendChild(note);
 }
 
@@ -369,12 +401,13 @@ function renderTable(days) {
     .slice()
     .reverse()
     .forEach((day) => {
+      const parts = tokenParts(day);
       const models = Object.keys(day.models || {}).join(", ") || "--";
       const row = document.createElement("tr");
       row.innerHTML = `
         <td>${day.date}</td>
         <td>${formatNumber(day.totalTokens)}</td>
-        <td>${formatNumber(day.inputTokens)}</td>
+        <td>${formatNumber(parts.nonCachedInput)}</td>
         <td>${formatNumber(day.cachedInputTokens)}</td>
         <td>${formatNumber(day.outputTokens)}</td>
         <td>${formatNumber(day.reasoningOutputTokens)}</td>
