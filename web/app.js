@@ -71,22 +71,43 @@ function formatPercent(value) {
 
 function tokenParts(usage) {
   const input = Number(usage?.inputTokens) || 0;
-  const cached = Number(usage?.cachedInputTokens) || 0;
+  const legacyCached = Number(usage?.cachedInputTokens) || 0;
+  const cacheRead = Number(usage?.cacheReadTokens) || 0;
+  const cacheCreation = Number(usage?.cacheCreationTokens) || 0;
   const output = Number(usage?.outputTokens) || 0;
   const total = Number(usage?.totalTokens) || 0;
-  const separateTotal = input + cached + output;
+  const hasNamedCache =
+    Object.prototype.hasOwnProperty.call(usage || {}, "cacheReadTokens") ||
+    Object.prototype.hasOwnProperty.call(usage || {}, "cacheCreationTokens");
+
+  if (hasNamedCache) {
+    const promptInput = input + cacheRead + cacheCreation;
+
+    return {
+      cachedInput: cacheRead,
+      cacheCreationInput: cacheCreation,
+      nonCachedInput: input,
+      output,
+      promptInput,
+      displayTotal: total || promptInput + output,
+      cacheShare: promptInput > 0 ? cacheRead / promptInput : 0,
+    };
+  }
+
+  const separateTotal = input + legacyCached + output;
   const combinedTotal = input + output;
   const tolerance = Math.max(2, total * 0.000001);
   const usesSeparateCached =
-    cached > 0 && (cached > input || Math.abs(total - separateTotal) <= tolerance);
+    legacyCached > 0 && (legacyCached > input || Math.abs(total - separateTotal) <= tolerance);
 
-  const nonCachedInput = usesSeparateCached ? input : Math.max(input - cached, 0);
-  const promptInput = usesSeparateCached ? input + cached : input;
+  const nonCachedInput = usesSeparateCached ? input : Math.max(input - legacyCached, 0);
+  const promptInput = usesSeparateCached ? input + legacyCached : input;
   const displayTotal =
-    total || (usesSeparateCached ? separateTotal : Math.max(combinedTotal, cached + nonCachedInput + output));
+    total || (usesSeparateCached ? separateTotal : Math.max(combinedTotal, legacyCached + nonCachedInput + output));
 
   return {
-    cachedInput: cached,
+    cachedInput: legacyCached,
+    cacheCreationInput: 0,
     nonCachedInput,
     output,
     promptInput,
@@ -140,7 +161,12 @@ function renderMetrics(days, totals) {
   const latest = days.at(-1);
   const latestTotal = Number(latest.totalTokens) || 0;
   const totalTokens = Number(totals.totalTokens) || days.reduce((sum, day) => sum + (Number(day.totalTokens) || 0), 0);
-  const hasTotals = Number(totals.totalTokens) || Number(totals.inputTokens) || Number(totals.cachedInputTokens);
+  const hasTotals =
+    Number(totals.totalTokens) ||
+    Number(totals.inputTokens) ||
+    Number(totals.cachedInputTokens) ||
+    Number(totals.cacheReadTokens) ||
+    Number(totals.cacheCreationTokens);
   const totalParts = hasTotals
     ? tokenParts(totals)
     : days.reduce(
@@ -157,7 +183,7 @@ function renderMetrics(days, totals) {
 
   renderMetric("最新日期", formatCompact(latestTotal), `${latest.date} · ${formatCost(latest.costUSD)}`);
   renderMetric("累计 Token", formatCompact(totalTokens), `最近 30 条记录 ${formatCompact(recentTotal)}`);
-  renderMetric("缓存输入占比", formatPercent(cacheShare), `${formatCompact(totalParts.cachedInput)} cached input`);
+  renderMetric("缓存读取占比", formatPercent(cacheShare), `${formatCompact(totalParts.cachedInput)} cache read`);
   renderMetric("费用估算", formatCost(totals.costUSD), "本地 JSONL 统计，不等同订阅额度");
 }
 
@@ -282,13 +308,16 @@ function renderBreakdown(days) {
 
   const latest = days.at(-1);
   const parts = tokenParts(latest);
-  const total = Math.max(parts.cachedInput + parts.nonCachedInput + parts.output, 1);
+  const total = Math.max(parts.cachedInput + parts.cacheCreationInput + parts.nonCachedInput + parts.output, 1);
   const reasoning = Number(latest.reasoningOutputTokens) || 0;
 
   els.latestDatePill.textContent = latest.date;
 
   const segments = [
-    { label: "缓存输入", value: parts.cachedInput, color: "var(--sage)" },
+    { label: "缓存读取", value: parts.cachedInput, color: "var(--sage)" },
+    ...(parts.cacheCreationInput > 0
+      ? [{ label: "缓存写入", value: parts.cacheCreationInput, color: "var(--brass)" }]
+      : []),
     { label: "非缓存输入", value: parts.nonCachedInput, color: "var(--clay)" },
     { label: "输出", value: parts.output, color: "var(--teal)" },
   ];
@@ -320,7 +349,7 @@ function renderBreakdown(days) {
 
   const note = document.createElement("div");
   note.className = "reasoning-note";
-  note.textContent = `推理输出 ${formatNumber(reasoning)} token；Token 构成按缓存输入、非缓存输入和输出拆分，推理输出单独列出。`;
+  note.textContent = `推理输出 ${formatNumber(reasoning)} token；Token 构成按缓存读取、缓存写入、非缓存输入和输出拆分，推理输出单独列出。`;
   els.breakdown.appendChild(note);
 }
 
@@ -392,7 +421,7 @@ function renderTable(days) {
 
   if (!days.length) {
     const row = document.createElement("tr");
-    row.innerHTML = `<td colspan="8" class="muted">暂无每日明细</td>`;
+    row.innerHTML = `<td colspan="9" class="muted">暂无每日明细</td>`;
     els.dailyRows.appendChild(row);
     return;
   }
@@ -408,7 +437,8 @@ function renderTable(days) {
         <td>${day.date}</td>
         <td>${formatNumber(day.totalTokens)}</td>
         <td>${formatNumber(parts.nonCachedInput)}</td>
-        <td>${formatNumber(day.cachedInputTokens)}</td>
+        <td>${formatNumber(parts.cachedInput)}</td>
+        <td>${formatNumber(parts.cacheCreationInput)}</td>
         <td>${formatNumber(day.outputTokens)}</td>
         <td>${formatNumber(day.reasoningOutputTokens)}</td>
         <td>${formatCost(day.costUSD)}</td>
