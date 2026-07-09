@@ -1,4 +1,5 @@
 codex-usage-logs/
+usage-logs/
 .npm-cache/
 verification/
 node_modules/

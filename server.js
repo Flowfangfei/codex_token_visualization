@@ -6,9 +6,39 @@ const { spawn } = require("node:child_process");
 
 const ROOT = __dirname;
 const WEB_ROOT = path.join(ROOT, "web");
-const LOG_ROOT = process.env.CODEX_USAGE_LOG_DIR || path.join(ROOT, "codex-usage-logs", "daily");
 const CODEX_AUTH_PATH = process.env.CODEX_AUTH_PATH || path.join(os.homedir(), ".codex", "auth.json");
 const DEFAULT_PORT = 8787;
+
+const SOURCE_CONFIGS = {
+  codex: {
+    label: "Codex",
+    filePrefix: "codex-usage",
+    command: ["codex", "daily"],
+    logRoot:
+      process.env.CODEX_USAGE_LOG_DIR ||
+      path.join(process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs"), "codex", "daily"),
+    legacyRoots: [path.join(ROOT, "codex-usage-logs", "daily")],
+  },
+  claude: {
+    label: "Claude Code",
+    filePrefix: "claude-usage",
+    command: ["claude", "daily"],
+    logRoot:
+      process.env.CLAUDE_USAGE_LOG_DIR ||
+      path.join(process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs"), "claude", "daily"),
+    detectPath: path.join(os.homedir(), ".claude"),
+  },
+  all: {
+    label: "All Agents",
+    filePrefix: "all-usage",
+    command: ["daily"],
+    logRoot:
+      process.env.ALL_USAGE_LOG_DIR ||
+      path.join(process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs"), "all", "daily"),
+  },
+};
+
+const EXPORT_SEQUENCE = ["codex", "claude", "all"];
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -18,7 +48,7 @@ const MIME = {
   ".svg": "image/svg+xml",
 };
 
-let exportInFlight = null;
+const exportInFlight = new Map();
 
 function parseArgs() {
   const index = process.argv.findIndex((arg) => arg === "--port" || arg === "-p");
@@ -48,7 +78,7 @@ function localDateTime(value) {
   const absOffset = Math.abs(offsetMinutes);
   const offsetHours = String(Math.floor(absOffset / 60)).padStart(2, "0");
   const offsetMins = String(absOffset % 60).padStart(2, "0");
-  const pad = (value) => String(value).padStart(2, "0");
+  const pad = (number) => String(number).padStart(2, "0");
 
   return [
     `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
@@ -127,14 +157,26 @@ async function fetchResetCredits() {
   }
 }
 
-function latestUsageSnapshot() {
-  fs.mkdirSync(LOG_ROOT, { recursive: true });
+function normalizeSource(value, fallback = "codex") {
+  const source = String(value || fallback).toLowerCase();
+  if (source === "overview" || source === "combined") return "all";
+  if (SOURCE_CONFIGS[source]) return source;
+  return null;
+}
 
-  const files = fs
-    .readdirSync(LOG_ROOT, { withFileTypes: true })
+function sourceFromUrl(req, fallback = "codex") {
+  const url = new URL(req.url, "http://localhost");
+  return normalizeSource(url.searchParams.get("source"), fallback);
+}
+
+function listJsonFiles(dir) {
+  if (!fs.existsSync(dir)) return [];
+
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
     .map((entry) => {
-      const fullPath = path.join(LOG_ROOT, entry.name);
+      const fullPath = path.join(dir, entry.name);
       const stat = fs.statSync(fullPath);
       return {
         name: entry.name,
@@ -145,25 +187,49 @@ function latestUsageSnapshot() {
       };
     })
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
 
-  if (files.length === 0) {
-    return {
-      generatedAt: new Date().toISOString(),
-      logDir: LOG_ROOT,
-      latestFile: null,
-      files: [],
-      daily: [],
-      totals: {},
-    };
+function latestUsageSnapshot(source = "codex") {
+  const normalizedSource = normalizeSource(source);
+  if (!normalizedSource) {
+    throw new Error(`Unknown source: ${source}`);
   }
+
+  const config = SOURCE_CONFIGS[normalizedSource];
+  fs.mkdirSync(config.logRoot, { recursive: true });
+
+  const candidateRoots = [config.logRoot, ...(config.legacyRoots || [])];
+  let activeRoot = config.logRoot;
+  let files = [];
+
+  for (const root of candidateRoots) {
+    files = listJsonFiles(root);
+    if (files.length) {
+      activeRoot = root;
+      break;
+    }
+  }
+
+  const base = {
+    generatedAt: new Date().toISOString(),
+    source: normalizedSource,
+    label: config.label,
+    logDir: activeRoot,
+    primaryLogDir: config.logRoot,
+    latestFile: null,
+    files: [],
+    daily: [],
+    totals: {},
+  };
+
+  if (files.length === 0) return base;
 
   const latest = files[0];
   const raw = fs.readFileSync(latest.path, "utf8").replace(/^\uFEFF/, "");
   const parsed = JSON.parse(raw);
 
   return {
-    generatedAt: new Date().toISOString(),
-    logDir: LOG_ROOT,
+    ...base,
     latestFile: {
       name: latest.name,
       path: latest.path,
@@ -176,16 +242,21 @@ function latestUsageSnapshot() {
   };
 }
 
-function exportUsageSnapshot() {
-  if (exportInFlight) return exportInFlight;
+function exportUsageSnapshot(source = "codex") {
+  const normalizedSource = normalizeSource(source);
+  if (!normalizedSource) {
+    return Promise.reject(new Error(`Unknown source: ${source}`));
+  }
+
+  if (exportInFlight.has(normalizedSource)) return exportInFlight.get(normalizedSource);
 
   const script = path.join(ROOT, "scripts", "export-daily.ps1");
   const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
 
-  exportInFlight = new Promise((resolve, reject) => {
+  const promise = new Promise((resolve, reject) => {
     const child = spawn(
       shell,
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Source", normalizedSource],
       { cwd: ROOT, windowsHide: true }
     );
 
@@ -215,21 +286,80 @@ function exportUsageSnapshot() {
       }
 
       resolve({
+        source: normalizedSource,
         code,
         stdout,
         stderr,
-        snapshot: latestUsageSnapshot(),
+        snapshot: latestUsageSnapshot(normalizedSource),
       });
     });
   }).finally(() => {
-    exportInFlight = null;
+    exportInFlight.delete(normalizedSource);
   });
 
-  return exportInFlight;
+  exportInFlight.set(normalizedSource, promise);
+  return promise;
 }
 
-function runExport(res) {
-  exportUsageSnapshot()
+async function exportEverything() {
+  const results = [];
+  const snapshots = {};
+
+  for (const source of EXPORT_SEQUENCE) {
+    try {
+      const result = await exportUsageSnapshot(source);
+      results.push({ source, ok: true, stdout: result.stdout, stderr: result.stderr });
+      snapshots[source] = result.snapshot;
+    } catch (error) {
+      results.push({
+        source,
+        ok: false,
+        code: error.code,
+        error: error.message,
+        stdout: error.stdout || "",
+        stderr: error.stderr || "",
+      });
+      try {
+        snapshots[source] = latestUsageSnapshot(source);
+      } catch (_) {
+        snapshots[source] = null;
+      }
+    }
+  }
+
+  const failures = results.filter((result) => !result.ok);
+  return {
+    ok: failures.length === 0,
+    partial: failures.length > 0 && failures.length < results.length,
+    results,
+    snapshots,
+    snapshot: snapshots.all || snapshots.codex || snapshots.claude || null,
+  };
+}
+
+function runExport(req, res) {
+  const url = new URL(req.url, "http://localhost");
+  const requestedSource = String(url.searchParams.get("source") || "codex").toLowerCase();
+
+  if (requestedSource === "everything") {
+    exportEverything()
+      .then((result) => {
+        const allFailed = result.results.every((item) => !item.ok);
+        sendJson(res, allFailed ? 500 : 200, result);
+      })
+      .catch((error) => {
+        sendJson(res, 500, { ok: false, error: error.message });
+      });
+    return;
+  }
+
+  const source = normalizeSource(requestedSource);
+  if (!source) {
+    sendJson(res, 400, { ok: false, error: `Unknown source: ${requestedSource}` });
+    return;
+  }
+
+  exportUsageSnapshot(source)
     .then((result) => {
       sendJson(res, 200, {
         ok: true,
@@ -239,12 +369,35 @@ function runExport(res) {
     .catch((error) => {
       sendJson(res, 500, {
         ok: false,
+        source,
         code: error.code,
         error: error.message,
         stdout: error.stdout || "",
         stderr: error.stderr || "",
       });
     });
+}
+
+function sourceStatus() {
+  return Object.entries(SOURCE_CONFIGS).map(([source, config]) => {
+    const snapshot = latestUsageSnapshot(source);
+    return {
+      source,
+      label: config.label,
+      command: `ccusage ${config.command.join(" ")} --json`,
+      logDir: snapshot.logDir,
+      primaryLogDir: snapshot.primaryLogDir,
+      fileCount: snapshot.files.length,
+      latestFile: snapshot.latestFile,
+      dailyCount: snapshot.daily.length,
+      detected:
+        source === "claude"
+          ? fs.existsSync(config.detectPath)
+          : source === "codex"
+            ? fs.existsSync(CODEX_AUTH_PATH)
+            : true,
+    };
+  });
 }
 
 function serveStatic(req, res) {
@@ -278,7 +431,17 @@ function serveStatic(req, res) {
 const server = http.createServer((req, res) => {
   try {
     if (req.method === "GET" && req.url.startsWith("/api/usage")) {
-      sendJson(res, 200, latestUsageSnapshot());
+      const source = sourceFromUrl(req, "codex");
+      if (!source) {
+        sendJson(res, 400, { ok: false, error: "Unknown source" });
+        return;
+      }
+      sendJson(res, 200, latestUsageSnapshot(source));
+      return;
+    }
+
+    if (req.method === "GET" && req.url.startsWith("/api/sources")) {
+      sendJson(res, 200, { ok: true, sources: sourceStatus() });
       return;
     }
 
@@ -295,7 +458,7 @@ const server = http.createServer((req, res) => {
     }
 
     if (req.method === "POST" && req.url.startsWith("/api/export")) {
-      runExport(res);
+      runExport(req, res);
       return;
     }
 
@@ -307,6 +470,8 @@ const server = http.createServer((req, res) => {
 
 const port = parseArgs();
 server.listen(port, () => {
-  console.log(`Codex usage dashboard: http://localhost:${port}`);
-  console.log(`Reading JSON logs from: ${LOG_ROOT}`);
+  console.log(`AI token dashboard: http://localhost:${port}`);
+  console.log(`Codex logs: ${SOURCE_CONFIGS.codex.logRoot}`);
+  console.log(`Claude logs: ${SOURCE_CONFIGS.claude.logRoot}`);
+  console.log(`All-agent logs: ${SOURCE_CONFIGS.all.logRoot}`);
 });

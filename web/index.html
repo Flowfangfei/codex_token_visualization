@@ -3,31 +3,39 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Codex Token Ledger</title>
+    <title>AI Token Ledger</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%232d2822'/%3E%3Ctext x='32' y='39' text-anchor='middle' font-size='20' font-family='Georgia' font-weight='700' fill='%23f7f0e6'%3EAI%3C/text%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="shell">
       <header class="topbar">
         <div class="brand-block">
-          <div class="mark" aria-hidden="true">C</div>
+          <div class="mark" aria-hidden="true">AI</div>
           <div>
-            <p class="eyebrow">Codex Usage</p>
-            <h1>Token Ledger</h1>
+            <p class="eyebrow">Local Agent Usage</p>
+            <h1>AI Token Ledger</h1>
           </div>
         </div>
         <div class="toolbar" aria-label="操作">
-          <button class="icon-button" id="refreshBtn" type="button" title="导出最新数据并刷新" aria-label="导出最新数据并刷新">
+          <button class="icon-button" id="refreshBtn" type="button" title="导出当前视图并刷新" aria-label="导出当前视图并刷新">
             <span aria-hidden="true">↻</span>
           </button>
           <button class="primary-button" id="exportBtn" type="button">
             <span aria-hidden="true">⬇</span>
-            <span>导出刷新</span>
+            <span>全部导出</span>
           </button>
         </div>
       </header>
 
       <main>
+        <nav class="view-tabs" aria-label="页面视图">
+          <button class="view-tab is-active" type="button" data-view="overview">总览</button>
+          <button class="view-tab" type="button" data-view="codex">Codex</button>
+          <button class="view-tab" type="button" data-view="claude">Claude Code</button>
+          <button class="view-tab" type="button" data-view="sources">数据源</button>
+        </nav>
+
         <section class="status-strip" aria-live="polite">
           <div>
             <span class="status-dot" id="statusDot"></span>
@@ -38,12 +46,14 @@
 
         <section class="metric-grid" id="metricGrid"></section>
 
-        <section class="layout-grid">
+        <section class="source-compare" id="sourceCompare"></section>
+
+        <section class="layout-grid" id="detailGrid">
           <article class="panel trend-panel">
             <div class="panel-heading">
               <div>
-                <p class="section-label">Daily Trend</p>
-                <h2>最近使用量</h2>
+                <p class="section-label" id="trendLabel">Daily Trend</p>
+                <h2 id="trendTitle">最近使用量</h2>
               </div>
               <div class="pill" id="rangePill">--</div>
             </div>
@@ -53,8 +63,8 @@
           <article class="panel split-panel">
             <div class="panel-heading">
               <div>
-                <p class="section-label">Latest Day</p>
-                <h2>Token 构成</h2>
+                <p class="section-label" id="breakdownLabel">Latest Day</p>
+                <h2 id="breakdownTitle">Token 构成</h2>
               </div>
               <div class="pill" id="latestDatePill">--</div>
             </div>
@@ -71,11 +81,11 @@
           <div class="reset-list" id="resetCreditList"></div>
         </section>
 
-        <section class="layout-grid lower-grid">
+        <section class="layout-grid lower-grid" id="lowerGrid">
           <article class="panel">
             <div class="panel-heading">
               <div>
-                <p class="section-label">Models</p>
+                <p class="section-label" id="modelsLabel">Models</p>
                 <h2>模型分布</h2>
               </div>
             </div>
@@ -94,11 +104,11 @@
           </article>
         </section>
 
-        <section class="panel table-panel">
+        <section class="panel table-panel" id="tablePanel">
           <div class="panel-heading">
             <div>
               <p class="section-label">Ledger</p>
-              <h2>每日明细</h2>
+              <h2 id="tableTitle">每日明细</h2>
             </div>
           </div>
           <div class="table-scroll">

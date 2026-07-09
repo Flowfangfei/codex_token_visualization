@@ -1,26 +1,26 @@
-# Codex Token Visualization
+# AI Token Ledger
 
-一个本地 Codex token 用量导出和可视化面板。它基于 `ccusage` 读取本机 Codex JSONL 日志，生成每日 JSON 快照，并用一个本地 WebUI 展示趋势、累计 token、缓存输入占比、费用估算、模型分布和每日明细。
+本项目是一个本地 AI coding agent token 用量导出和可视化面板。它基于 `ccusage` 读取本机 Codex 和 Claude Code 的本地 JSONL 日志，生成每日 JSON 快照，并用一个本地 WebUI 展示总览、Codex 明细、Claude Code 明细、模型分布、费用估算、缓存读取/写入、快照列表和每日明细。
 
-这个工具默认把所有运行数据保存在项目目录内，避免每天把导出文件、`npx` 缓存或临时数据写到 C 盘用户目录。
+所有运行数据默认保存在项目目录内，避免每天把导出文件、`npx` 缓存或临时数据写到 C 盘用户目录。
 
 ## 适合谁用
 
-- 想每天记录 Codex 本地 CLI token 消耗的人
-- 想把 `ccusage codex daily --json` 的结果长期保存下来的人
-- 想用浏览器快速查看每日趋势、累计消耗和模型分布的人
+- 想每天记录 Codex 和 Claude Code 本地 token 消耗的人
+- 想把 `ccusage` 的 JSON 输出长期按天保存下来的人
+- 想在一个 WebUI 里看总消耗、单工具消耗和模型分布的人
 - 不希望日志导出文件堆到 C 盘的人
 
 ## 功能
 
-- 一键导出 Codex 每日 token JSON
-- 自动保存到项目内的 `codex-usage-logs/daily`
-- `npx` 缓存固定到项目内的 `.npm-cache`
-- 本地 WebUI 仪表盘
-- 浏览器里点击“立即导出”即可刷新数据
-- 支持 Windows 每日计划任务
+- 总览页：Codex + Claude Code 总 token、近 30 日费用、总趋势、来源对比
+- Codex 页：Codex 每日趋势、Token 构成、模型分布、快照和明细
+- Claude Code 页：Claude Code 每日趋势、Token 构成、模型分布、快照和明细
+- 数据源页：查看 Codex / Claude / All 三个导出源是否有快照、日志目录和行数
+- Codex reset credits：读取本机 Codex 凭证后显示可用次数和有效期
+- 一键全部导出：同时导出 Codex、Claude Code 和 all-agent 聚合 JSON
+- 支持 Windows 每日计划任务，默认每天中午 12 点导出
 - 提供可双击启动脚本
-- 默认统计时区为 `Asia/Tokyo`
 
 ## 前置要求
 
@@ -29,8 +29,7 @@
 - Windows 10/11
 - Node.js 22 或更高版本
 - PowerShell
-- `ccusage`
-- 可用的 Codex 本地日志
+- 可用的 Codex 本地日志和/或 Claude Code 本地日志
 
 检查 Node.js：
 
@@ -43,11 +42,11 @@ npx --version
 
 ```powershell
 npx -y ccusage@latest codex daily --help
+npx -y ccusage@latest claude daily --help
+npx -y ccusage@latest daily --help
 ```
 
-说明：脚本内部使用的是 `npx -y ccusage@latest codex daily`，所以首次运行时会自动下载最新版 `ccusage`。如果你已经全局安装过也没问题，但不是必须全局安装。
-
-如果系统没有 Node.js，或版本低于 22，请先安装新版 Node.js LTS。
+脚本内部使用 `npx -y ccusage@latest`，首次运行时会自动下载最新版 `ccusage`。你不需要全局安装 `ccusage`；如果已经全局安装，也不影响使用。
 
 ## 快速开始
 
@@ -57,10 +56,10 @@ npx -y ccusage@latest codex daily --help
 cd "F:\学习和研究\新鲜玩意\codex额度助手"
 ```
 
-手动导出一次：
+手动导出全部数据源：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1
 ```
 
 启动仪表盘：
@@ -89,11 +88,77 @@ Windows 上可以直接双击项目根目录里的：
 open-dashboard.bat
 ```
 
-这个脚本会自动判断本地 `8787` 服务是否已经运行：
+脚本会自动判断本地 `8787` 服务是否已经运行：
 
 - 如果没有运行，会在后台启动 `server.js`
 - 如果已经运行，会直接打开浏览器
 - 最终都会打开 `http://localhost:8787`
+
+## 数据保存在哪里
+
+新的默认目录是：
+
+```text
+.\usage-logs\codex\daily\codex-usage-YYYY-MM-DD.json
+.\usage-logs\claude\daily\claude-usage-YYYY-MM-DD.json
+.\usage-logs\all\daily\all-usage-YYYY-MM-DD.json
+```
+
+`npx` 缓存默认保存到：
+
+```text
+.\.npm-cache
+```
+
+这些目录已经写入 `.gitignore`，不会提交到 GitHub。
+
+同一天内无论手动导出、计划任务导出，还是在 WebUI 里点击刷新，都会覆盖同一个当天文件。例如：
+
+```text
+.\usage-logs\claude\daily\claude-usage-2026-07-09.json
+```
+
+所以一天内多次刷新不会生成一堆重复 JSON。长期保存时最多按来源每天一个文件。
+
+旧版本的 Codex 快照目录：
+
+```text
+.\codex-usage-logs\daily
+```
+
+仍会作为读取 fallback。首次用新版导出后，Codex 会开始写入 `.\usage-logs\codex\daily`。
+
+## 手动导出
+
+导出全部数据源：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1
+```
+
+只导出 Codex：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1 -Source codex
+```
+
+只导出 Claude Code：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1 -Source claude
+```
+
+只导出 all-agent 聚合：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1 -Source all
+```
+
+默认时区是 `Asia/Tokyo`。你也可以改成：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1 -Timezone Asia/Shanghai
+```
 
 ## 每日自动导出
 
@@ -114,114 +179,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-tas
 计划任务名称默认是：
 
 ```text
-CodexUsageDailyExport
+AITokenLedgerDailyExport
 ```
 
 查看下一次运行时间：
 
 ```powershell
-Get-ScheduledTaskInfo -TaskName CodexUsageDailyExport
+Get-ScheduledTaskInfo -TaskName AITokenLedgerDailyExport
 ```
 
 删除计划任务：
 
 ```powershell
-Unregister-ScheduledTask -TaskName CodexUsageDailyExport -Confirm:$false
-```
-
-## 数据保存在哪里
-
-每日 JSON 快照默认保存到：
-
-```text
-.\codex-usage-logs\daily\codex-usage-YYYY-MM-DD.json
-```
-
-`npx` 缓存默认保存到：
-
-```text
-.\.npm-cache
-```
-
-这两个目录已经写入 `.gitignore`，不会被提交到 GitHub。
-
-同一天内无论手动导出、计划任务导出，还是在 WebUI 里点击刷新，都会写入同一个当天文件，例如：
-
-```text
-.\codex-usage-logs\daily\codex-usage-2026-05-07.json
-```
-
-所以一天内多次刷新是覆盖更新，不会生成一堆重复 JSON。长期保存时最多按日期每天一个文件。
-
-## 手动导出脚本
-
-运行：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1
-```
-
-默认等价于：
-
-```powershell
-npx -y ccusage@latest codex daily --timezone Asia/Tokyo --json
-```
-
-但脚本额外做了几件事：
-
-- 自动创建 `codex-usage-logs/daily`
-- 自动创建 `.npm-cache`
-- 把 `npx` 缓存固定到项目目录
-- 输出 UTF-8 no BOM JSON，避免 Node.js 读取时报 BOM 错误
-- 文件名使用当天日期，例如 `codex-usage-2026-05-06.json`
-
-自定义时区：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1 -Timezone Asia/Shanghai
-```
-
-自定义输出根目录：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1 -OutputRoot "D:\codex-usage-logs"
+Unregister-ScheduledTask -TaskName AITokenLedgerDailyExport -Confirm:$false
 ```
 
 ## WebUI 使用方式
 
-启动服务：
+WebUI 顶部有四个视图：
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-webui.ps1 -Port 8787
-```
+- `总览`：显示 Codex + Claude Code 的总消耗和来源对比
+- `Codex`：只看 Codex
+- `Claude Code`：只看 Claude Code
+- `数据源`：查看三个导出源的本地快照状态
 
-访问：
+右上角两个操作：
 
-```text
-http://localhost:8787
-```
-
-WebUI 会读取最新的 JSON 快照，并展示：
-
-- 最新一天 token 用量
-- 累计 token
-- 缓存读取占比，兼容新版 `ccusage` 的 `cacheReadTokens` / `cacheCreationTokens` 结构
-- 费用估算
-- 最近趋势图
-- 最新一天 token 构成
-- banked rate-limit reset credits 的可用次数、授予时间和到期时间
-- 模型分布
-- 本地快照列表，列表内部滚动，不会拉长页面
-- 每日明细表，表格内部滚动并固定表头
-
-页面右上角有两个操作：
-
-- 刷新图标：运行 `ccusage codex daily`，覆盖更新当天 JSON，然后重新渲染页面
-- “导出刷新”：和刷新图标相同，用于更明确地手动触发一次导出
+- 刷新图标：导出当前视图对应的数据源并刷新页面
+- `全部导出`：同时导出 Codex、Claude Code 和 all-agent 聚合，然后刷新当前视图
 
 首次打开页面只会读取本地已有 JSON，不会自动运行导出命令。这样可以避免每次打开浏览器都启动 `npx`；需要最新数据时再手动点击刷新。
 
-## 重置额度有效期
+## Codex reset credits 有效期
 
 页面会尝试读取本机 Codex 登录凭证：
 
@@ -245,7 +234,7 @@ https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
 
 `granted_at` 和 `expires_at` 会转成本机本地时间显示。服务端不会把 `access_token`、`refresh_token`、cookie 或完整唯一 ID 返回给前端。若接口返回 `401`，通常表示本机 Codex 凭证失效，或 Authorization header 没有正确携带。
 
-OpenAI 的 referral promotion 说明中提到，banked Codex rate-limit reset 通常需要在加入 bank 后 30 天内使用，除非具体 offer 另有说明。因此这个面板只作为本地提醒，最终仍以官方 Codex usage 页面和 offer 文案为准。
+reset credits 只属于 Codex / ChatGPT 口径，所以不会显示在 Claude Code 页。
 
 ## 项目结构
 
@@ -256,6 +245,7 @@ OpenAI 的 referral promotion 说明中提到，banked Codex rate-limit reset �
 ├─ package.json
 ├─ server.js
 ├─ scripts
+│  ├─ export-all-daily.ps1
 │  ├─ export-daily.ps1
 │  ├─ open-dashboard.ps1
 │  ├─ register-daily-task.ps1
@@ -264,12 +254,14 @@ OpenAI 的 referral promotion 说明中提到，banked Codex rate-limit reset �
 │  ├─ app.js
 │  ├─ index.html
 │  └─ styles.css
-├─ codex-usage-logs
-│  └─ daily
+├─ usage-logs
+│  ├─ codex
+│  ├─ claude
+│  └─ all
 └─ .npm-cache
 ```
 
-其中 `codex-usage-logs` 和 `.npm-cache` 是本地运行数据，不建议提交。
+`usage-logs`、旧的 `codex-usage-logs` 和 `.npm-cache` 都是本地运行数据，不建议提交。
 
 ## 常见问题
 
@@ -278,10 +270,26 @@ OpenAI 的 referral promotion 说明中提到，banked Codex rate-limit reset �
 先手动导出一次：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1
 ```
 
 然后刷新 `http://localhost:8787`。
+
+### Claude Code 页没有数据
+
+先确认本机有 Claude Code 日志：
+
+```powershell
+Test-Path "$HOME\.claude"
+```
+
+再确认 `ccusage` 能读取：
+
+```powershell
+npx -y ccusage@latest claude daily --json
+```
+
+如果这里没有数据，WebUI 也不会有 Claude Code 数据。
 
 ### 端口 8787 被占用
 
@@ -307,30 +315,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\open-dashboard.ps1
 
 常见原因是 Node.js 没有安装、版本低于 22，或者 `node` 不在 PATH 里。
 
-### 计划任务没有执行
-
-查看任务状态：
-
-```powershell
-Get-ScheduledTask -TaskName CodexUsageDailyExport
-Get-ScheduledTaskInfo -TaskName CodexUsageDailyExport
-```
-
-也可以手动运行任务：
-
-```powershell
-Start-ScheduledTask -TaskName CodexUsageDailyExport
-```
-
 ## 统计边界
 
-这个工具统计的是本机 Codex JSONL 日志里的 token 消耗，适合回答：
+这个工具统计的是本机 JSONL 日志里的 token 消耗，适合回答：
 
 ```text
-我这台机器上的 Codex CLI 日志里，按天消耗了多少 token？
+我这台机器上的 Codex / Claude Code 本地日志里，按天消耗了多少 token？
 ```
 
-它不保证完全等价于 ChatGPT/Codex 订阅额度的内部扣减。官方额度扣减可能还会受 plan、任务复杂度、上下文规模、执行位置等因素影响。
+它不保证完全等价于 ChatGPT、Codex 或 Claude 订阅额度的官方内部扣减。官方额度扣减可能还会受 plan、任务复杂度、上下文规模、执行位置、缓存策略等因素影响。
+
+Claude Code 的官方监控也可以走 Anthropic Usage/Cost API、Claude Code analytics 或 OpenTelemetry；本项目选择 `ccusage` 是因为它更轻量，适合个人机器的本地可视化。
 
 ## 隐私说明
 
@@ -339,6 +334,7 @@ Start-ScheduledTask -TaskName CodexUsageDailyExport
 提交到 GitHub 时，以下目录默认被忽略：
 
 ```text
+usage-logs/
 codex-usage-logs/
 .npm-cache/
 verification/

@@ -1,6 +1,6 @@
 param(
-  [string]$TaskName = "CodexUsageDailyExport",
-  [string]$At = "23:50",
+  [string]$TaskName = "AITokenLedgerDailyExport",
+  [string]$At = "12:00",
   [string]$Timezone = "Asia/Tokyo",
   [switch]$Force
 )
@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$ExportScript = Join-Path $PSScriptRoot "export-daily.ps1"
+$ExportScript = Join-Path $PSScriptRoot "export-all-daily.ps1"
 
 if (-not (Test-Path $ExportScript)) {
   throw "Cannot find export script: $ExportScript"
@@ -30,9 +30,9 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument 
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Export Codex token usage JSON into the local project folder." | Out-Null
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Export Codex, Claude Code, and all-agent token usage JSON into the local project folder." | Out-Null
 
 Write-Host "Registered daily task: $TaskName"
 Write-Host "Runs every day at: $At"
 Write-Host "Timezone argument for ccusage: $Timezone"
-Write-Host "Output folder: $(Join-Path $ProjectRoot 'codex-usage-logs\daily')"
+Write-Host "Output folder: $(Join-Path $ProjectRoot 'usage-logs')"

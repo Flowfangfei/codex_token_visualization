@@ -1,4 +1,6 @@
 param(
+  [ValidateSet("codex", "claude", "all")]
+  [string]$Source = "codex",
   [string]$Timezone = "Asia/Tokyo",
   [string]$OutputRoot,
   [string]$FileDate
@@ -8,7 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $OutputRoot) {
-  $OutputRoot = Join-Path $ProjectRoot "codex-usage-logs"
+  $OutputRoot = Join-Path $ProjectRoot (Join-Path "usage-logs" $Source)
 }
 
 $DailyRoot = Join-Path $OutputRoot "daily"
@@ -35,23 +37,38 @@ if (-not $FileDate) {
   $FileDate = Get-Date -Format "yyyy-MM-dd"
 }
 
-$OutputFile = Join-Path $DailyRoot "codex-usage-$FileDate.json"
+$SourceConfig = @{
+  codex = @{
+    Prefix = "codex-usage"
+    Args = @("codex", "daily")
+  }
+  claude = @{
+    Prefix = "claude-usage"
+    Args = @("claude", "daily")
+  }
+  all = @{
+    Prefix = "all-usage"
+    Args = @("daily")
+  }
+}
+
+$Config = $SourceConfig[$Source]
+$OutputFile = Join-Path $DailyRoot "$($Config.Prefix)-$FileDate.json"
 $env:npm_config_cache = $NpmCache
 
 $npxArgs = @(
   "--cache", $NpmCache,
   "-y",
-  "ccusage@latest",
-  "codex",
-  "daily",
+  "ccusage@latest"
+) + $Config.Args + @(
   "--timezone", $Timezone,
   "--json"
 )
 
-Write-Host "Exporting Codex usage to: $OutputFile"
+Write-Host "Exporting $Source usage to: $OutputFile"
 Write-Host "Timezone: $Timezone"
 Write-Host "npm cache: $NpmCache"
-Write-Host "Command: npx --cache `"$NpmCache`" -y ccusage@latest codex daily --timezone $Timezone --json"
+Write-Host "Command: npx --cache `"$NpmCache`" -y ccusage@latest $($Config.Args -join ' ') --timezone $Timezone --json"
 
 $json = (& npx @npxArgs) -join [Environment]::NewLine
 if ($LASTEXITCODE -ne 0) {
