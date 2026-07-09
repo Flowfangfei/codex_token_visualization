@@ -1,11 +1,13 @@
 const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
 const ROOT = __dirname;
 const WEB_ROOT = path.join(ROOT, "web");
 const LOG_ROOT = process.env.CODEX_USAGE_LOG_DIR || path.join(ROOT, "codex-usage-logs", "daily");
+const CODEX_AUTH_PATH = process.env.CODEX_AUTH_PATH || path.join(os.homedir(), ".codex", "auth.json");
 const DEFAULT_PORT = 8787;
 
 const MIME = {
@@ -34,6 +36,95 @@ function sendJson(res, status, payload) {
     "cache-control": "no-store",
   });
   res.end(body);
+}
+
+function localDateTime(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absOffset = Math.abs(offsetMinutes);
+  const offsetHours = String(Math.floor(absOffset / 60)).padStart(2, "0");
+  const offsetMins = String(absOffset % 60).padStart(2, "0");
+  const pad = (value) => String(value).padStart(2, "0");
+
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+    `GMT${sign}${offsetHours}:${offsetMins}`,
+  ].join(" ");
+}
+
+function readCodexAccessToken() {
+  const raw = fs.readFileSync(CODEX_AUTH_PATH, "utf8").replace(/^\uFEFF/, "");
+  const parsed = JSON.parse(raw);
+  const token = parsed?.tokens?.access_token;
+  if (!token || typeof token !== "string") {
+    throw new Error("tokens.access_token not found in Codex auth file");
+  }
+  return token;
+}
+
+function normalizeCreditsPayload(payload) {
+  const credits = Array.isArray(payload?.credits)
+    ? payload.credits
+    : Array.isArray(payload?.items)
+      ? payload.items
+      : Array.isArray(payload?.data)
+        ? payload.data
+        : [];
+
+  return {
+    ok: true,
+    fetched_at: localDateTime(new Date().toISOString()),
+    available_count: Number(payload?.available_count) || 0,
+    credits: credits.map((credit) => {
+      const expiresAt = credit?.expires_at ? new Date(credit.expires_at) : null;
+      const expiresAtMs = expiresAt && !Number.isNaN(expiresAt.getTime()) ? expiresAt.getTime() : null;
+
+      return {
+        status: credit?.status ?? null,
+        title: credit?.title ?? null,
+        granted_at: localDateTime(credit?.granted_at),
+        expires_at: localDateTime(credit?.expires_at),
+        expires_at_ms: expiresAtMs,
+      };
+    }),
+  };
+}
+
+async function fetchResetCredits() {
+  let accessToken;
+  try {
+    accessToken = readCodexAccessToken();
+    const response = await fetch("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    if (response.status === 401) {
+      return {
+        ok: false,
+        status: 401,
+        message: "凭证失效或 Authorization header 未正确携带。",
+      };
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        message: `ChatGPT reset credits endpoint returned HTTP ${response.status}`,
+      };
+    }
+
+    return normalizeCreditsPayload(await response.json());
+  } finally {
+    accessToken = null;
+  }
 }
 
 function latestUsageSnapshot() {
@@ -188,6 +279,18 @@ const server = http.createServer((req, res) => {
   try {
     if (req.method === "GET" && req.url.startsWith("/api/usage")) {
       sendJson(res, 200, latestUsageSnapshot());
+      return;
+    }
+
+    if (req.method === "GET" && req.url.startsWith("/api/reset-credits")) {
+      fetchResetCredits()
+        .then((payload) => sendJson(res, payload.ok ? 200 : payload.status || 500, payload))
+        .catch((error) => {
+          sendJson(res, 500, {
+            ok: false,
+            message: error.message,
+          });
+        });
       return;
     }
 

@@ -14,6 +14,9 @@ const els = {
   dailyRows: document.querySelector("#dailyRows"),
   refreshBtn: document.querySelector("#refreshBtn"),
   exportBtn: document.querySelector("#exportBtn"),
+  resetCredits: document.querySelector("#resetCredits"),
+  resetSummary: document.querySelector("#resetSummary"),
+  resetCreditList: document.querySelector("#resetCreditList"),
 };
 
 const monthIndex = new Map(
@@ -112,8 +115,73 @@ function tokenParts(usage) {
     output,
     promptInput,
     displayTotal,
-    cacheShare: promptInput > 0 ? cached / promptInput : 0,
+    cacheShare: promptInput > 0 ? legacyCached / promptInput : 0,
   };
+}
+
+function resetExpiryMs(credit) {
+  const value = Number(credit?.expires_at_ms);
+  return Number.isFinite(value) ? value : null;
+}
+
+function formatRemaining(credit) {
+  const expiresAtMs = resetExpiryMs(credit);
+  if (!expiresAtMs) return "--";
+
+  const ms = expiresAtMs - Date.now();
+  if (ms <= 0) return "已过期";
+
+  const days = Math.floor(ms / 86400000);
+  const hours = Math.floor((ms % 86400000) / 3600000);
+  if (days > 0) return `${days} 天 ${hours} 小时`;
+  return `${Math.max(1, hours)} 小时内`;
+}
+
+function renderResetCredits(data) {
+  if (!els.resetSummary || !els.resetCreditList) return;
+
+  els.resetCreditList.replaceChildren();
+
+  if (!data?.ok) {
+    els.resetCredits.classList.add("is-warning");
+    els.resetSummary.textContent = data?.message || "无法读取重置额度。";
+    return;
+  }
+
+  els.resetCredits.classList.remove("is-warning");
+  const credits = Array.isArray(data.credits) ? data.credits : [];
+  const availableCredits = credits.filter((credit) => credit.status === "available");
+  const nextExpiry = availableCredits
+    .map((credit) => ({ credit, expiresAtMs: resetExpiryMs(credit) }))
+    .filter((item) => item.expiresAtMs && item.expiresAtMs > Date.now())
+    .sort((a, b) => a.expiresAtMs - b.expiresAtMs)[0];
+
+  if (nextExpiry) {
+    els.resetSummary.textContent = `可用 ${data.available_count} 次；最近到期 ${nextExpiry.credit.expires_at}，剩余 ${formatRemaining(nextExpiry.credit)}`;
+  } else {
+    els.resetSummary.textContent = `可用 ${data.available_count} 次；未发现未来到期时间。`;
+  }
+
+  if (!credits.length) {
+    els.resetCreditList.appendChild(emptyState("暂无 banked reset credit"));
+    return;
+  }
+
+  credits.forEach((credit) => {
+    const row = document.createElement("div");
+    row.className = "reset-row";
+    row.innerHTML = `
+      <div class="reset-main">
+        <div class="reset-title">${credit.title || "Rate-limit reset"}</div>
+        <div class="reset-meta">${credit.status || "--"} · granted ${credit.granted_at || "--"}</div>
+      </div>
+      <div class="reset-expiry">
+        <strong>${credit.expires_at || "--"}</strong>
+        <span>${formatRemaining(credit)}</span>
+      </div>
+    `;
+    els.resetCreditList.appendChild(row);
+  });
 }
 
 function formatBytes(bytes) {
@@ -472,6 +540,22 @@ async function loadUsage() {
   }
 }
 
+async function loadResetCredits() {
+  if (!els.resetSummary) return;
+  els.resetSummary.textContent = "正在读取可用重置额度...";
+
+  try {
+    const response = await fetch("/api/reset-credits", { cache: "no-store" });
+    const data = await response.json();
+    renderResetCredits(data);
+  } catch (error) {
+    renderResetCredits({
+      ok: false,
+      message: `读取重置额度失败：${error.message}`,
+    });
+  }
+}
+
 async function exportAndRefresh(source = "button") {
   els.exportBtn.disabled = true;
   els.refreshBtn.disabled = true;
@@ -498,3 +582,4 @@ els.refreshBtn.addEventListener("click", () => exportAndRefresh("refresh"));
 els.exportBtn.addEventListener("click", () => exportAndRefresh("export"));
 
 loadUsage();
+loadResetCredits();

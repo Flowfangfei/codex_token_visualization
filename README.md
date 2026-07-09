@@ -209,6 +209,7 @@ WebUI 会读取最新的 JSON 快照，并展示：
 - 费用估算
 - 最近趋势图
 - 最新一天 token 构成
+- banked rate-limit reset credits 的可用次数、授予时间和到期时间
 - 模型分布
 - 本地快照列表，列表内部滚动，不会拉长页面
 - 每日明细表，表格内部滚动并固定表头
@@ -219,6 +220,32 @@ WebUI 会读取最新的 JSON 快照，并展示：
 - “导出刷新”：和刷新图标相同，用于更明确地手动触发一次导出
 
 首次打开页面只会读取本地已有 JSON，不会自动运行导出命令。这样可以避免每次打开浏览器都启动 `npx`；需要最新数据时再手动点击刷新。
+
+## 重置额度有效期
+
+页面会尝试读取本机 Codex 登录凭证：
+
+```text
+~\.codex\auth.json
+```
+
+然后用其中的 `tokens.access_token` 请求 ChatGPT 的 reset credits 接口：
+
+```text
+https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
+```
+
+前端只展示：
+
+- `available_count`
+- 每个 credit 的 `status`
+- 每个 credit 的 `title`
+- 每个 credit 的 `granted_at`
+- 每个 credit 的 `expires_at`
+
+`granted_at` 和 `expires_at` 会转成本机本地时间显示。服务端不会把 `access_token`、`refresh_token`、cookie 或完整唯一 ID 返回给前端。若接口返回 `401`，通常表示本机 Codex 凭证失效，或 Authorization header 没有正确携带。
+
+OpenAI 的 referral promotion 说明中提到，banked Codex rate-limit reset 通常需要在加入 bank 后 30 天内使用，除非具体 offer 另有说明。因此这个面板只作为本地提醒，最终仍以官方 Codex usage 页面和 offer 文案为准。
 
 ## 项目结构
 
