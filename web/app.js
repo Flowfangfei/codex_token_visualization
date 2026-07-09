@@ -573,6 +573,7 @@ async function exportAndRefresh(source = "button") {
   } catch (error) {
     setStatus(`导出刷新失败：${error.message}`, "error");
   } finally {
+    await loadResetCredits();
     els.exportBtn.disabled = false;
     els.refreshBtn.disabled = false;
   }
