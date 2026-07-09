@@ -838,7 +838,7 @@ els.viewTabs.forEach((tab) => {
   });
 });
 
-els.refreshBtn.addEventListener("click", () => exportAndRefresh("current"));
+els.refreshBtn.addEventListener("click", () => exportAndRefresh("everything"));
 els.exportBtn.addEventListener("click", () => exportAndRefresh("everything"));
 
 const initialView = location.hash.replace("#", "") || "overview";
