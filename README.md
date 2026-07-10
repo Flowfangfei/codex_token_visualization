@@ -1,46 +1,57 @@
 # AI Token Ledger
 
-本项目是一个本地 AI coding agent token 用量导出和可视化面板。它基于 `ccusage` 读取本机 Codex 和 Claude Code 的本地 JSONL 日志，生成每日 JSON 快照，并用一个本地 WebUI 展示总览、Codex 明细、Claude Code 明细、模型分布、费用估算、缓存读取/写入、快照列表和每日明细。
+> 一个 Windows-first 的本地 AI coding agent 用量账本：统一查看 Codex、Claude Code 与 Cursor 的 token 消耗、账户额度、重置时间和耗尽预测。
 
-所有运行数据默认保存在项目目录内，避免每天把导出文件、`npx` 缓存或临时数据写到 C 盘用户目录。
+`AI Token Ledger` 将本机日志和账户额度快照放在同一个本地仪表盘里。它不需要数据库服务，不上传 usage JSON，也不会把每日导出和 `npx` 缓存写进 C 盘用户目录。
 
-## 适合谁用
+## 界面预览
 
-- 想每天记录 Codex 和 Claude Code 本地 token 消耗的人
-- 想把 `ccusage` 的 JSON 输出长期按天保存下来的人
-- 想在一个 WebUI 里看总消耗、单工具消耗和模型分布的人
-- 不希望日志导出文件堆到 C 盘的人
+以下截图来自本地聚合数据示例；数值会随账户和日志变化，截图不包含凭证、cookie 或账户 ID。
 
-## 功能
+### 总览
 
-- 总览页：Codex + Claude Code + Cursor 的来源对比、总 token、近 30 日费用和总趋势
-- 额度预测页：按来源显示官方账户额度窗口、真实重置时间、token 消耗速率和预测耗尽时间
-- Codex 页：Codex 每日趋势、Token 构成、模型分布、快照和明细
-- Claude Code 页：Claude Code 每日趋势、Token 构成、模型分布、快照和明细
-- Cursor 页：Cursor usage events 聚合的独立每日 token 展示；账户账期与计划用量在额度预测页同步
-- 数据源页：查看 Codex / Claude / Cursor / All 四个导出源、日志目录和账户额度快照
-- Codex reset credits：读取本机 Codex 凭证后显示可用次数和有效期
-- 一键全部导出：同时导出 Codex、Claude Code、all-agent 聚合 JSON，并同步账户额度快照
-- 支持 Windows 每日计划任务，默认每天中午 12 点导出并同步账户额度
-- 提供可双击启动脚本
+Codex、Claude Code、Cursor 的累计用量、近 30 日估算费用、模型分布、趋势、重置额度与每日明细集中在一页。
 
-## 前置要求
+![AI Token Ledger 总览](docs/assets/overview.png)
 
-需要安装：
+### Cursor Pro 额度预测
 
-- Windows 10/11
-- Node.js 22 或更高版本
-- PowerShell
-- 可用的 Codex 本地日志和/或 Claude Code 本地日志
+Cursor 页面使用设置页同口径的 `Included in Pro` 总百分比，并单独保留 `Auto + Composer` 与 `API` 分项；不会把旧计划单位误当成 Pro 额度百分比。
 
-检查 Node.js：
+![Cursor Pro 额度预测](docs/assets/forecast-cursor-pro.png)
+
+### 移动端
+
+手机端保持完整功能，顶部导航可横向浏览，不会把页面主体撑出视口。
+
+![移动端额度预测](docs/assets/forecast-mobile.png)
+
+## 能做什么
+
+| 能力 | 说明 |
+| --- | --- |
+| 多来源用量账本 | 分别展示 Codex、Claude Code、Cursor；总览可同时比较三者。 |
+| 每日快照 | Codex / Claude Code / all-agent 使用 `ccusage` 导出为当天覆盖式 JSON。Cursor 自动汇总最近 90 天 usage events。 |
+| 官方额度窗口 | 同步 Codex、Claude Code、Cursor 的当前已用比例、剩余额度、账期或重置时间。 |
+| 统一刷新 | 顶部刷新和“全部导出”会同时刷新三个本地 token 源与三个账户额度源。 |
+| 耗尽预测 | 结合今日实时速度、3 日、7 日速度，预测当前额度窗口的消耗节奏。 |
+| 模型等效 Token | 样本足够时，从官方额度变化反向学习模型权重；不会拿 API 价格伪装成订阅额度换算。 |
+| 日内重置识别 | 上午用完额度、午间重置、下午继续使用时，重置前后的 Token 会自动分段，避免污染拟合。 |
+| 重置 credits | Codex 页可显示 reset credit 的可用次数与本地时区有效期。 |
+| 定时导出 | Windows 计划任务默认每天中午 12:00 运行，即使晚间关机也不影响。 |
+
+## 30 秒开始
+
+### 1. 检查运行环境
+
+当前项目面向 Windows 10/11，建议使用 Node.js 22 或更高版本、PowerShell 以及已经登录的 Codex / Claude Code / Cursor。
 
 ```powershell
 node --version
 npx --version
 ```
 
-检查 `ccusage`：
+本项目使用当前维护的 `ccusage` 命令。旧版 `@ccusage/codex` 用户无需卸载，但导出脚本会执行 `npx -y ccusage@latest`，首次运行时自动下载，无需全局安装。
 
 ```powershell
 npx -y ccusage@latest codex daily --help
@@ -48,337 +59,309 @@ npx -y ccusage@latest claude daily --help
 npx -y ccusage@latest daily --help
 ```
 
-脚本内部使用 `npx -y ccusage@latest`，首次运行时会自动下载最新版 `ccusage`。你不需要全局安装 `ccusage`；如果已经全局安装，也不影响使用。
-
-## 快速开始
-
-进入项目目录：
+### 2. 导出第一份数据
 
 ```powershell
 cd "F:\学习和研究\新鲜玩意\codex额度助手"
+npm run export
 ```
 
-手动导出全部数据源：
+也可以直接运行 PowerShell 脚本：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1
 ```
 
-启动仪表盘：
+### 3. 打开仪表盘
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-webui.ps1 -Port 8787
-```
-
-打开浏览器访问：
-
-```text
-http://localhost:8787
-```
-
-## 最简单的打开方式
-
-Windows 上可以直接双击项目根目录里的：
-
-```text
-打开仪表盘.bat
-```
-
-或：
-
-```text
-open-dashboard.bat
-```
-
-脚本会自动判断本地 `8787` 服务是否已经运行：
-
-- 如果没有运行，会在后台启动 `server.js`
-- 如果已经运行，会直接打开浏览器
-- 最终都会打开 `http://localhost:8787`
-
-## 数据保存在哪里
-
-新的默认目录是：
-
-```text
-.\usage-logs\codex\daily\codex-usage-YYYY-MM-DD.json
-.\usage-logs\claude\daily\claude-usage-YYYY-MM-DD.json
-.\usage-logs\all\daily\all-usage-YYYY-MM-DD.json
-.\usage-logs\quota-snapshots\codex\quota-codex-YYYY-MM-DD.json
-.\usage-logs\quota-snapshots\claude\quota-claude-YYYY-MM-DD.json
-.\usage-logs\quota-snapshots\cursor\quota-cursor-YYYY-MM-DD.json
-.\usage-logs\quota-observations\{codex,claude,cursor}\quota-observations-YYYY-MM-DD.json
-```
-
-`npx` 缓存默认保存到：
-
-```text
-.\.npm-cache
-```
-
-这些目录已经写入 `.gitignore`，不会提交到 GitHub。
-
-同一天内无论手动导出、计划任务导出，还是在 WebUI 里点击刷新，都会覆盖同一个当天文件。例如：
-
-```text
-.\usage-logs\claude\daily\claude-usage-2026-07-09.json
-```
-
-所以一天内多次刷新不会生成一堆重复 JSON。长期保存时最多按来源每天一个文件。
-
-账户额度快照也按同一规则保存：同一天内无论浏览器刷新还是计划任务运行，都会覆盖该来源当天的 `quota-*.json`。这些快照只保存已经汇总后的百分比、重置时间、账期和计划用量，不保存 access token、cookie、邮箱或账户 ID。
-
-为了识别同一天内的额度重置，项目还会写入紧凑的 `quota-observations-YYYY-MM-DD.json`。每个来源每天仍只有一个观测文件，内部观测点会去重并限制为最多 96 条，只保留最近 120 天。观测点仅含额度窗口、分段编号、汇总 Token 和模型汇总，不含凭证、原始请求、会话内容或账户 ID。
-
-旧版本的 Codex 快照目录：
-
-```text
-.\codex-usage-logs\daily
-```
-
-仍会作为读取 fallback。首次用新版导出后，Codex 会开始写入 `.\usage-logs\codex\daily`。
-
-## 手动导出
-
-导出全部数据源：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1
-```
-
-只导出 Codex：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1 -Source codex
-```
-
-只导出 Claude Code：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1 -Source claude
-```
-
-只导出 all-agent 聚合：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-daily.ps1 -Source all
-```
-
-默认时区是 `Asia/Tokyo`。你也可以改成：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1 -Timezone Asia/Shanghai
-```
-
-## 每日自动导出
-
-默认推荐中午导出，避免晚上电脑已经关机导致任务错过。
-
-注册每天中午 12 点导出：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 -At 12:00 -Timezone Asia/Tokyo
-```
-
-如果任务已经存在，需要覆盖：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 -At 12:00 -Timezone Asia/Tokyo -Force
-```
-
-计划任务名称默认是：
-
-```text
-AITokenLedgerDailyExport
-```
-
-查看下一次运行时间：
-
-```powershell
-Get-ScheduledTaskInfo -TaskName AITokenLedgerDailyExport
-```
-
-删除计划任务：
-
-```powershell
-Unregister-ScheduledTask -TaskName AITokenLedgerDailyExport -Confirm:$false
-```
-
-## WebUI 使用方式
-
-WebUI 顶部有四个视图：
-
-- `总览`：显示 Codex + Claude Code 的总消耗和来源对比
-- `Codex`：只看 Codex
-- `Claude Code`：只看 Claude Code
-- `数据源`：查看三个导出源的本地快照状态
-
-右上角两个操作：
-
-- 刷新图标：同时导出 Codex、Claude Code 和 all-agent 聚合，然后刷新当前视图
-- `全部导出`：和刷新图标相同，用于更明确地手动触发一次全量导出
-
-首次打开页面只会读取本地已有 JSON，不会自动运行导出命令。这样可以避免每次打开浏览器都启动 `npx`；需要最新数据时再手动点击刷新。
-
-点击刷新图标或 `全部导出` 时会统一执行：
-
-1. 导出 Codex、Claude Code 和 all-agent 的当日 token 快照。
-2. 同步 Codex、Claude Code 和 Cursor 的账户额度快照。
-3. 重新读取当前页面，因此无论停留在哪个标签页都会看到同一轮最新数据。
-
-在“额度预测”页可以分别选择 Codex、Claude Code 或 Cursor。`刷新时同步账户额度` 默认开启；关闭后，该来源的浏览器刷新和每日计划任务都不会读取其账户凭证或发起账户用量请求。
-
-## 额度预测与自动周期
-
-Codex、Claude Code 和 Cursor 的周期优先从账户数据自动读取，不需要手动填写结束日：
-
-- Codex：通过本机 `codex app-server` 的 `account/rateLimits/read` 读取短窗口、长窗口、已用百分比和重置时间。
-- Claude Code：从本机 `~\.claude\.credentials.json` 的 Claude OAuth 登录态读取账户 usage 窗口；请求只发送到 `https://api.anthropic.com/api/oauth/usage`。
-- Cursor：从 Windows Cursor 本地 `state.vscdb` 读取会话凭证，请求 `https://cursor.com/api/usage-summary` 获得账期，并以 Cursor 设置页同口径的 `Included in Pro`、`Auto + Composer`、`API` 百分比作为额度主统计；旧的计划单位只保留为诊断数据。同步还会通过 usage events 接口汇总最近 90 天的每日 token 快照。
-
-三种凭证均只在本机内存中用于对应官方账户请求，服务端不会返回或写入 access token、refresh token、cookie、邮箱或完整账户 ID。网络不可用、凭证失效、Cursor 未登录，或接口结构变更时，预测页会保留最近快照并显示同步失败；你仍可使用页面里的手动 Token 预算作为后备。
-
-预测分为三个阶段：
-
-1. 当前重置分段少于 3 个观测点：显示账户当前剩余额度、真实重置时间，以及“今日截至当前 / 近 3 日 / 近 7 日”的原始 Token 加权日均。
-2. 同一重置分段达到至少 3 个观测点：对观测点之间的 Token 增量与官方已用百分比做最小二乘拟合，得到实际 `百分比 / Token` 扣减系数、预计耗尽时间和 `R²`。
-3. 同一重置分段达到至少 7 个观测点，且模型占比有足够变化：使用带先验收缩和权重上下限的岭回归反向学习各模型的额度权重，再生成“模型等效 Token”日均。若样本不足、模型混合稳定或拟合质量下降，会自动退回原始 Token 单斜率，不输出不可靠的模型换算。
-
-当 `resetsAt` 改变、官方已用百分比明显下降，或本地累计计数回退时，会自动开启新的拟合分段。即使上午用完额度、当天手动重置后继续使用，重置前后的 Token 也不会混入同一条拟合曲线。
-
-Cursor 的账户百分比与 token 目前不保证一一对应，因此会同时显示官方账期、分项百分比和最近 90 天的每日 token 事件；在百分比与 token 的对应关系被账户数据稳定验证前，不把两者强行换算成固定 token 上限，避免错误预测。
-
-## Codex reset credits 有效期
-
-页面会尝试读取本机 Codex 登录凭证：
-
-```text
-~\.codex\auth.json
-```
-
-然后用其中的 `tokens.access_token` 请求 ChatGPT 的 reset credits 接口：
-
-```text
-https://chatgpt.com/backend-api/wham/rate-limit-reset-credits
-```
-
-前端只展示：
-
-- `available_count`
-- 每个 credit 的 `status`
-- 每个 credit 的 `title`
-- 每个 credit 的 `granted_at`
-- 每个 credit 的 `expires_at`
-
-`granted_at` 和 `expires_at` 会转成本机本地时间显示。服务端不会把 `access_token`、`refresh_token`、cookie 或完整唯一 ID 返回给前端。若接口返回 `401`，通常表示本机 Codex 凭证失效，或 Authorization header 没有正确携带。
-
-reset credits 只属于 Codex / ChatGPT 口径，所以不会显示在 Claude Code 页。
-
-## 项目结构
-
-```text
-.
-├─ open-dashboard.bat
-├─ 打开仪表盘.bat
-├─ package.json
-├─ server.js
-├─ scripts
-│  ├─ export-all-daily.ps1
-│  ├─ export-daily.ps1
-│  ├─ open-dashboard.ps1
-│  ├─ register-daily-task.ps1
-│  ├─ sync-account-quotas.mjs
-│  └─ start-webui.ps1
-├─ web
-│  ├─ app.js
-│  ├─ index.html
-│  └─ styles.css
-├─ usage-logs
-│  ├─ codex
-│  ├─ claude
-│  ├─ cursor
-│  ├─ all
-│  ├─ quota-snapshots
-│  └─ quota-observations
-└─ .npm-cache
-```
-
-`usage-logs`、旧的 `codex-usage-logs` 和 `.npm-cache` 都是本地运行数据，不建议提交。
-
-## 常见问题
-
-### 页面显示没有数据
-
-先手动导出一次：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1
-```
-
-然后刷新 `http://localhost:8787`。
-
-### Claude Code 页没有数据
-
-先确认本机有 Claude Code 日志：
-
-```powershell
-Test-Path "$HOME\.claude"
-```
-
-再确认 `ccusage` 能读取：
-
-```powershell
-npx -y ccusage@latest claude daily --json
-```
-
-如果这里没有数据，WebUI 也不会有 Claude Code 数据。
-
-### 端口 8787 被占用
-
-换一个端口启动：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-webui.ps1 -Port 8790
-```
-
-然后访问：
-
-```text
-http://localhost:8790
-```
-
-### 双击脚本闪退
-
-直接在 PowerShell 里运行，能看到错误信息：
+最简单的方式是双击项目根目录中的 `打开仪表盘.bat`，或在 PowerShell 中运行：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\open-dashboard.ps1 -Port 8787
 ```
 
-常见原因是 Node.js 没有安装、版本低于 22，或者 `node` 不在 PATH 里。
+浏览器地址：<http://127.0.0.1:8787>
 
-## 统计边界
+开发时也可以直接启动：
 
-这个工具统计的是本机 JSONL 日志里的 token 消耗，适合回答：
-
-```text
-我这台机器上的 Codex / Claude Code 本地日志里，按天消耗了多少 token？
+```powershell
+npm start
 ```
 
-它不保证完全等价于 ChatGPT、Codex 或 Claude 订阅额度的官方内部扣减。官方额度扣减可能还会受 plan、任务复杂度、上下文规模、执行位置、缓存策略等因素影响。
+## 工作原理
 
-Claude Code 的官方监控也可以走 Anthropic Usage/Cost API、Claude Code analytics 或 OpenTelemetry；本项目选择 `ccusage` 是因为它更轻量，适合个人机器的本地可视化。
+```mermaid
+flowchart LR
+  A[Codex 本地 JSONL] --> B[ccusage codex daily]
+  C[Claude Code 本地 JSONL] --> D[ccusage claude daily]
+  E[Cursor 本地数据库] --> F[Cursor usage events]
+  B --> G[usage-logs/codex/daily]
+  D --> H[usage-logs/claude/daily]
+  F --> I[usage-logs/cursor/daily]
+  G --> J[AI Token Ledger WebUI]
+  H --> J
+  I --> J
+  K[Codex app-server] --> L[账户额度快照]
+  M[Claude OAuth usage] --> L
+  N[Cursor usage summary] --> L
+  L --> J
+  J --> O[额度预测与重置分段]
+```
 
-## 隐私说明
+点击顶部刷新或“全部导出”时，系统固定按以下顺序执行：
 
-默认不会上传任何本地 usage JSON。WebUI 运行在本机 `localhost`，读取的是本项目目录下的 JSON 快照。
+1. 导出 Codex、Claude Code 与 all-agent 的当日 JSON。
+2. 同步 Codex、Claude Code、Cursor 的账户额度窗口。
+3. 记录去重后的分段观测点。
+4. 重新读取当前页面；不管停留在哪个标签页，看到的都是同一轮数据。
 
-提交到 GitHub 时，以下目录默认被忽略：
+## 页面说明
+
+| 页面 | 适合查看的内容 |
+| --- | --- |
+| `总览` | 三个来源的整体比较、总趋势、模型分布、每日总账。 |
+| `额度预测` | Codex / Claude Code / Cursor 的官方剩余额度、重置时间、速度与耗尽预测。 |
+| `Codex` | Codex 的每日趋势、缓存构成、费用、模型、快照、reset credits。 |
+| `Claude Code` | Claude Code 的每日趋势、缓存构成、费用、模型、快照。 |
+| `Cursor` | Cursor usage events 汇总的独立 token 使用明细。 |
+| `数据源` | 日志目录、检测状态、每日快照和额度观测点数量。 |
+
+页面首次打开只读取已有 JSON，不会自动执行 `npx`。需要最新数据时再点右上角刷新，避免每次打开浏览器都触发导出。
+
+## 数据源与账户同步
+
+| 来源 | 本地 token 数据 | 账户额度数据 | 自动周期 |
+| --- | --- | --- | --- |
+| Codex | `ccusage codex daily --json` | 本机 `codex app-server` 的 `account/rateLimits/read` | 5 小时 / 周窗口与重置时间 |
+| Claude Code | `ccusage claude daily --json` | 本机 Claude OAuth 登录态请求 usage 窗口 | 5 小时 / 7 天窗口与重置时间 |
+| Cursor | 最近 90 天 Cursor usage events 聚合 | Cursor usage summary | Cursor 账期、Included in Pro、Auto + Composer、API |
+
+### Codex
+
+Codex 的额度来自本机 CLI 的 app-server，因此不会把 Codex 登录 token 返回给浏览器。页面还会读取 reset credits 的数量和有效期，但只展示汇总字段。
+
+### Claude Code
+
+Claude Code 的本地 token 明细来自 JSONL；额度窗口来自本机登录态。若凭证失效、网络不可用或账户接口调整，面板会保留上一次成功快照并显示同步失败，而不会清空历史数据。
+
+### Cursor Pro
+
+Cursor 的旧 `plan.used / plan.limit` 单位与“Included in Pro”百分比不是同一件事。项目将设置页同口径的总百分比作为主要额度进度，同时展示 `Auto + Composer`、`API` 和账期；旧单位只作为诊断数据保留，不参与 Pro 百分比预测。
+
+## 额度预测：原始 Token、模型等效 Token 与重置
+
+### 为什么不直接按 API 价格换算？
+
+不同模型、缓存命中、上下文规模、任务形态都会影响订阅额度的内部扣减。API 价格可用于成本估算，但不等同于 Codex、Claude 或 Cursor 的订阅限额消耗。因此，面板不会把 API 单价硬编码为“额度 Token 权重”。
+
+### 预测分层
+
+| 阶段 | 条件 | 面板行为 |
+| --- | --- | --- |
+| 观察期 | 当前重置分段少于 3 个观测点 | 显示官方额度、重置时间、今日 / 3 日 / 7 日原始 Token 速度。 |
+| 单变量拟合 | 至少 3 个观测点 | 对 Token 增量和官方已用百分比进行最小二乘拟合，显示 `R²` 与预测耗尽时间。 |
+| 模型等效 Token | 至少 7 个观测点，且模型占比存在显著变化 | 使用岭回归反向学习模型相对权重；权重受先验与 `0.25x - 4x` 范围约束。 |
+
+如果样本不足、模型一直不变、模型混合没有足够变化，或加权拟合质量更差，系统会自动退回原始 Token 单斜率。这里的“模型等效 Token”只对当前账户、当前周期和当前观测数据有效，不是官方公开换算率。
+
+### 如果额度在一天内被重置
+
+每次有效刷新都会写入一个紧凑观测点，记录当前长周期窗口、已用比例、重置时间、累计 Token 和分模型汇总。下列任一情况会自动切换到新分段：
+
+- `resetsAt` 变化超过 5 分钟；
+- 官方已用百分比下降超过 0.5 个百分点；
+- 本地累计 Token 计数回退。
+
+因此“上午用完，午间重置，下午继续跑”的 Token 不会和上午额度消耗混在同一条拟合曲线上。5 分钟容差用来吸收部分账户接口返回的毫秒级重置时间抖动。
+
+完整设计说明见：[额度等效 Token 与重置分段设计](docs/plans/2026-07-10-quota-equivalent-token-design.md)。
+
+## 每日自动导出
+
+默认建议每天中午 12:00 导出，避开晚间关机。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 -At 12:00 -Timezone Asia/Tokyo
+```
+
+如果已有任务需要覆盖：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 -At 12:00 -Timezone Asia/Tokyo -Force
+```
+
+旧版用户若机器上已有 `CodexUsageDailyExport`，可以原地替换为全量同步任务：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 `
+  -TaskName CodexUsageDailyExport `
+  -At 12:00 `
+  -Timezone Asia/Tokyo `
+  -Force
+```
+
+查看任务：
+
+```powershell
+Get-ScheduledTaskInfo -TaskName AITokenLedgerDailyExport
+```
+
+删除任务：
+
+```powershell
+Unregister-ScheduledTask -TaskName AITokenLedgerDailyExport -Confirm:$false
+```
+
+如果你使用旧任务名，请把上面两条命令中的任务名替换为 `CodexUsageDailyExport`。
+
+## 常用命令
+
+```powershell
+# 运行单元测试
+npm test
+
+# 导出全部本地 token 数据并同步账户额度
+npm run export
+
+# 只导出 Codex / Claude / all-agent JSON
+npm run export:codex
+npm run export:claude
+npm run export:all
+
+# 启动本地 WebUI
+npm start
+```
+
+默认 `ccusage` 导出时区是 `Asia/Tokyo`。如果希望改为上海时区：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1 -Timezone Asia/Shanghai
+```
+
+## 本地文件与存储控制
 
 ```text
 usage-logs/
-codex-usage-logs/
-.npm-cache/
-verification/
-node_modules/
+├─ codex/daily/                 # 每天一个 Codex JSON
+├─ claude/daily/                # 每天一个 Claude Code JSON
+├─ cursor/daily/                # 每天一个 Cursor events 聚合 JSON
+├─ all/daily/                   # 每天一个 all-agent 聚合 JSON
+├─ quota-snapshots/             # 每来源每天一个账户额度快照
+├─ quota-observations/          # 每来源每天一个观测文件，最多 96 条
+└─ forecast-settings.json       # 页面中的本地后备设置
 ```
+
+存储策略：
+
+- token 快照与额度快照：同一天重复运行会覆盖同名 JSON。
+- 额度观测：每来源每天一个文件，最多 96 个去重观测点，自动保留 120 天。
+- `npx` 缓存：默认位于项目内的 `.npm-cache`。
+- 所有上述运行数据都在 `.gitignore` 中，不会被提交到 GitHub。
+
+旧的 `codex-usage-logs/daily` 会作为读取 fallback；新版数据会优先写到 `usage-logs/codex/daily`。
+
+## 隐私与统计边界
+
+### 不会保存或提交的内容
+
+- Codex / Claude / Cursor 的 access token、refresh token、cookie；
+- 邮箱、完整账户 ID、会话内容、原始 Cursor events；
+- `usage-logs/`、`codex-usage-logs/`、`.npm-cache/`、`verification/`、`node_modules/`。
+
+账户凭证只在本机内存中，用于向对应服务读取自己的账户用量；本地 WebUI 不会把它们返回给浏览器。
+
+### 这个项目回答什么问题
+
+它很适合回答：
+
+> 我这台机器上的 Codex / Claude Code / Cursor，最近每天消耗了多少 token？当前额度还剩多少？按现在速度能用多久？
+
+它不能保证：
+
+> 本地 token 总数与订阅产品内部扣减绝对相等。
+
+官方内部扣减仍可能受 plan、模型、缓存、上下文、任务复杂度、云端执行与平台策略影响。预测页优先展示官方额度比例和重置时间；本地 token 用于解释速度与趋势。
+
+## 常见问题
+
+### 页面显示没有数据
+
+先运行一次全量导出：
+
+```powershell
+npm run export
+```
+
+然后刷新 <http://127.0.0.1:8787>。
+
+### Claude Code 页没有 token 数据
+
+检查本机日志和 `ccusage`：
+
+```powershell
+Test-Path "$HOME\.claude"
+npx -y ccusage@latest claude daily --json
+```
+
+如果命令本身没有数据，WebUI 也不会有 Claude Code 明细。
+
+### 账户额度同步失败
+
+常见原因是网络不可用、CLI 未登录、OAuth 凭证失效、Cursor 未登录，或第三方账户接口结构调整。面板会保留最近成功快照；重新登录相应客户端后点击顶部刷新即可重试。
+
+### 端口 8787 被占用
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-webui.ps1 -Port 8790
+```
+
+然后访问 <http://127.0.0.1:8790>。
+
+### 双击脚本后窗口闪退
+
+在 PowerShell 中运行即可看到错误：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\open-dashboard.ps1 -Port 8787
+```
+
+重点检查 Node.js 是否安装、版本是否至少为 22，以及 `node` 是否在 `PATH` 中。
+
+## 项目结构
+
+```text
+.
+├─ 打开仪表盘.bat
+├─ open-dashboard.bat
+├─ package.json
+├─ server.js
+├─ README.md
+├─ docs/
+│  ├─ assets/
+│  └─ plans/
+├─ scripts/
+│  ├─ export-all-daily.ps1
+│  ├─ export-daily.ps1
+│  ├─ open-dashboard.ps1
+│  ├─ register-daily-task.ps1
+│  ├─ start-webui.ps1
+│  └─ sync-account-quotas.mjs
+├─ tests/
+│  └─ forecast-model.test.js
+└─ web/
+   ├─ app.js
+   ├─ forecast-model.js
+   ├─ index.html
+   └─ styles.css
+```
+
+## 开发与验证
+
+```powershell
+npm test
+node --check server.js
+node --check web/app.js
+node --check web/forecast-model.js
+```
+
+测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多观测点，以及额度重置分段判定。
