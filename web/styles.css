@@ -234,6 +234,280 @@ main {
   color: var(--paper);
 }
 
+.forecast-view {
+  display: grid;
+  gap: 16px;
+}
+
+.forecast-heading,
+.forecast-agent-tabs,
+.forecast-metric-grid,
+.forecast-layout,
+.forecast-form,
+.forecast-rate-list,
+.runway-summary,
+.runway-dates,
+.forecast-advice,
+.forecast-fallback-fields {
+  display: grid;
+}
+
+.forecast-heading {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+  padding: 4px 0 2px;
+}
+
+.forecast-agent-tabs {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(92px, auto);
+  gap: 4px;
+  padding: 4px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 250, 242, 0.62);
+}
+
+.forecast-agent-tab {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.forecast-agent-tab:hover,
+.forecast-agent-tab.is-active {
+  background: var(--teal);
+  color: var(--paper);
+}
+
+.forecast-metric-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.forecast-layout {
+  grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.75fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.forecast-runway-panel,
+.forecast-settings-panel,
+.forecast-rate-panel {
+  min-width: 0;
+}
+
+.forecast-runway {
+  display: grid;
+  gap: 14px;
+}
+
+.runway-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.runway-stat {
+  min-width: 0;
+  padding: 11px 0;
+  border-bottom: 1px solid rgba(45, 40, 34, 0.1);
+}
+
+.runway-stat-label,
+.forecast-rate-caption,
+.forecast-fallback-fields > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.runway-stat-value {
+  margin-top: 7px;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", "Noto Serif SC", serif;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.runway-track-wrap {
+  position: relative;
+  padding-top: 18px;
+}
+
+.runway-marker {
+  position: absolute;
+  top: 0;
+  z-index: 1;
+  width: 1px;
+  height: 42px;
+  background: var(--ink);
+}
+
+.runway-marker-label {
+  position: absolute;
+  top: -18px;
+  left: 0;
+  width: max-content;
+  max-width: 145px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 800;
+  transform: translateX(-50%);
+}
+
+.runway-marker.is-end {
+  background: var(--clay-dark);
+}
+
+.runway-track {
+  display: flex;
+  height: 22px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--paper-deep);
+}
+
+.runway-used {
+  min-width: 2px;
+  background: var(--teal);
+}
+
+.runway-remaining {
+  min-width: 2px;
+  background: rgba(98, 118, 95, 0.42);
+}
+
+.runway-over {
+  background: var(--clay);
+}
+
+.runway-dates {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.runway-dates span:last-child {
+  text-align: right;
+}
+
+.forecast-advice {
+  gap: 7px;
+  margin-top: 18px;
+  padding: 13px;
+  border-left: 3px solid var(--brass);
+  background: rgba(166, 120, 47, 0.08);
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.forecast-advice strong {
+  color: var(--ink);
+}
+
+.forecast-form {
+  gap: 13px;
+}
+
+.field-label {
+  display: grid;
+  gap: 7px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field-label input,
+.field-label select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  outline: none;
+  background: var(--panel-strong);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.field-label input:focus,
+.field-label select:focus {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px rgba(49, 95, 102, 0.13);
+}
+
+.sync-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 34px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sync-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--teal);
+}
+
+.forecast-fallback-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 11px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(45, 40, 34, 0.1);
+}
+
+.forecast-fallback-fields > p {
+  grid-column: 1 / -1;
+}
+
+.forecast-save {
+  width: 100%;
+}
+
+.forecast-rate-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.forecast-rate-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(45, 40, 34, 0.11);
+  border-radius: 4px;
+  background: rgba(234, 223, 206, 0.34);
+}
+
+.forecast-rate-value {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.forecast-rate-row.is-weighted {
+  border-color: rgba(49, 95, 102, 0.42);
+  background: rgba(49, 95, 102, 0.07);
+}
+
 .status-strip {
   justify-content: space-between;
   gap: 16px;
@@ -313,6 +587,10 @@ main {
 
 .source-card.claude {
   border-left: 4px solid var(--clay);
+}
+
+.source-card.cursor {
+  border-left: 4px solid var(--brass);
 }
 
 .source-card h3 {
@@ -781,15 +1059,36 @@ tbody tr:hover {
   .metric-grid,
   .source-compare,
   .layout-grid,
-  .lower-grid {
+  .lower-grid,
+  .forecast-metric-grid,
+  .forecast-rate-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .forecast-layout {
+    grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 760px) {
+  html,
+  body {
+    max-width: 100%;
+    overflow-x: clip;
+  }
+
   .shell {
     width: min(100% - 20px, 1440px);
+    min-width: 0;
+    max-width: 100%;
     padding-top: 12px;
+    overflow-x: clip;
+  }
+
+  main,
+  .status-strip > div {
+    min-width: 0;
+    max-width: 100%;
   }
 
   .topbar,
@@ -803,12 +1102,25 @@ tbody tr:hover {
   }
 
   .view-tabs {
+    display: flex;
     width: 100%;
+    max-width: 100%;
     min-width: 0;
+    contain: inline-size;
+    overflow-x: auto;
   }
 
   .view-tab {
     flex: 0 0 auto;
+  }
+
+  .forecast-heading {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .forecast-agent-tabs {
+    width: 100%;
   }
 
   .primary-button {
@@ -837,8 +1149,20 @@ tbody tr:hover {
   .metric-grid,
   .source-compare,
   .layout-grid,
-  .lower-grid {
+  .lower-grid,
+  .forecast-metric-grid,
+  .forecast-rate-list {
     grid-template-columns: 1fr;
+  }
+
+  .forecast-layout,
+  .runway-summary,
+  .forecast-fallback-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .forecast-fallback-fields > p {
+    grid-column: auto;
   }
 
   .source-card,

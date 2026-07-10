@@ -27,6 +27,24 @@ const els = {
   resetCredits: document.querySelector("#resetCredits"),
   resetSummary: document.querySelector("#resetSummary"),
   resetCreditList: document.querySelector("#resetCreditList"),
+  forecastView: document.querySelector("#forecastView"),
+  forecastAgentTabs: [...document.querySelectorAll(".forecast-agent-tab")],
+  forecastMetricGrid: document.querySelector("#forecastMetricGrid"),
+  forecastRunwayTitle: document.querySelector("#forecastRunwayTitle"),
+  forecastPeriodPill: document.querySelector("#forecastPeriodPill"),
+  forecastRunway: document.querySelector("#forecastRunway"),
+  forecastAdvice: document.querySelector("#forecastAdvice"),
+  forecastSourcePill: document.querySelector("#forecastSourcePill"),
+  forecastRateList: document.querySelector("#forecastRateList"),
+  forecastForm: document.querySelector("#forecastForm"),
+  forecastSaveBtn: document.querySelector("#forecastSaveBtn"),
+  forecastSubscriptionPlan: document.querySelector("#forecastSubscriptionPlan"),
+  forecastAccountSync: document.querySelector("#forecastAccountSync"),
+  forecastBudgetTokens: document.querySelector("#forecastBudgetTokens"),
+  forecastPeriodEnd: document.querySelector("#forecastPeriodEnd"),
+  forecastCycleDays: document.querySelector("#forecastCycleDays"),
+  forecastFallbackUsed: document.querySelector("#forecastFallbackUsed"),
+  forecastFallbackDaily: document.querySelector("#forecastFallbackDaily"),
   viewTabs: [...document.querySelectorAll(".view-tab")],
 };
 
@@ -38,6 +56,12 @@ const VIEW_CONFIGS = {
     subtitle: "Codex + Claude Code",
     trendTitle: "总使用趋势",
     breakdownTitle: "最新总构成",
+  },
+  forecast: {
+    source: "all",
+    label: "额度预测",
+    exportSource: "everything",
+    subtitle: "本地用量速率与周期预算",
   },
   codex: {
     source: "codex",
@@ -55,6 +79,14 @@ const VIEW_CONFIGS = {
     trendTitle: "Claude 使用趋势",
     breakdownTitle: "Claude Token 构成",
   },
+  cursor: {
+    source: "cursor",
+    label: "Cursor",
+    exportSource: "everything",
+    subtitle: "Cursor 本地用量数据",
+    trendTitle: "Cursor 使用趋势",
+    breakdownTitle: "Cursor Token 构成",
+  },
   sources: {
     source: "all",
     label: "数据源",
@@ -65,6 +97,10 @@ const VIEW_CONFIGS = {
 
 let currentView = "overview";
 let latestResetCredits = null;
+let forecastAgent = "codex";
+let forecastSettings = null;
+let forecastSnapshots = {};
+let forecastQuotas = {};
 
 const monthIndex = new Map(
   ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].map(
@@ -147,6 +183,693 @@ function formatCost(value) {
 
 function formatPercent(value) {
   return `${((Number(value) || 0) * 100).toFixed(1)}%`;
+}
+
+const FORECAST_AGENT_META = {
+  codex: { label: "Codex" },
+  claude: { label: "Claude Code" },
+  cursor: { label: "Cursor" },
+};
+
+const FORECAST_DEFAULT_PLANS = {
+  codex: "ChatGPT Pro 5x",
+  claude: "Claude Max 5x",
+  cursor: "Cursor",
+};
+
+function localDateKey(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function dayKey(day) {
+  const parsed = parseCcDate(dayDate(day));
+  if (Number.isNaN(parsed.getTime())) return null;
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${parsed.getUTCFullYear()}-${pad(parsed.getUTCMonth() + 1)}-${pad(parsed.getUTCDate())}`;
+}
+
+function addDays(dateKey, offset) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey || "")) return null;
+  const date = new Date(`${dateKey}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + Number(offset || 0));
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+}
+
+function dayDistance(from, to) {
+  if (!from || !to) return null;
+  const start = new Date(`${from}T00:00:00Z`).getTime();
+  const end = new Date(`${to}T00:00:00Z`).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return Math.round((end - start) / 86400000);
+}
+
+function formatDateKey(value) {
+  if (!value) return "--";
+  const date = new Date(`${value}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+}
+
+function formatRunway(days) {
+  if (!Number.isFinite(days)) return "--";
+  if (days <= 0) return "已耗尽";
+  const wholeDays = Math.floor(days);
+  const hours = Math.max(1, Math.round((days - wholeDays) * 24));
+  if (wholeDays >= 14) return `${(days / 7).toFixed(1)} 周`;
+  if (wholeDays > 0) return `${wholeDays} 天 ${hours} 小时`;
+  return `${hours} 小时`;
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function defaultForecastPlan(agent = forecastAgent) {
+  return {
+    subscriptionPlan: FORECAST_DEFAULT_PLANS[agent] || "",
+    accountSyncEnabled: true,
+    budgetTokens: null,
+    periodEndsOn: null,
+    cycleDays: 7,
+    fallbackUsedTokens: null,
+    fallbackDailyTokens: null,
+  };
+}
+
+function forecastPlan(agent = forecastAgent) {
+  return {
+    ...defaultForecastPlan(agent),
+    ...(forecastSettings?.agents?.[agent] || {}),
+  };
+}
+
+function inputNumberOrNull(value) {
+  if (value === "" || value === null || value === undefined) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function usageForDateRange(days, start, end) {
+  return days.reduce((sum, day) => {
+    const key = dayKey(day);
+    if (!key || (start && key < start) || (end && key > end)) return sum;
+    return sum + (Number(day.totalTokens) || 0);
+  }, 0);
+}
+
+function localUsageDays(snapshot) {
+  return sortDays(snapshot?.daily || []).filter((day) => {
+    const key = dayKey(day);
+    return key && key <= localDateKey();
+  });
+}
+
+function buildForecastRate(days, fallbackDailyTokens) {
+  const today = localDateKey();
+  const todayUsage = usageForDateRange(days, today, today);
+  const now = new Date();
+  const elapsedHours = Math.max(1, now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600);
+  const todayRate = todayUsage > 0 ? (todayUsage / elapsedHours) * 24 : null;
+  const threeDayStart = addDays(today, -2);
+  const sevenDayStart = addDays(today, -6);
+  const threeDayUsage = usageForDateRange(days, threeDayStart, today);
+  const sevenDayUsage = usageForDateRange(days, sevenDayStart, today);
+  const threeDayRate = threeDayUsage > 0 ? threeDayUsage / 3 : null;
+  const sevenDayRate = sevenDayUsage > 0 ? sevenDayUsage / 7 : null;
+
+  const weightedParts = [];
+  if (todayRate) weightedParts.push({ value: todayRate, weight: 0.55 });
+  if (threeDayRate) weightedParts.push({ value: threeDayRate, weight: todayRate ? 0.3 : 0.65 });
+  if (sevenDayRate) weightedParts.push({ value: sevenDayRate, weight: todayRate ? 0.15 : 0.35 });
+
+  const weightTotal = weightedParts.reduce((sum, part) => sum + part.weight, 0);
+  const weightedRate = weightTotal
+    ? weightedParts.reduce((sum, part) => sum + part.value * part.weight, 0) / weightTotal
+    : inputNumberOrNull(fallbackDailyTokens);
+
+  return {
+    today,
+    todayUsage,
+    elapsedHours,
+    todayRate,
+    threeDayUsage,
+    threeDayRate,
+    sevenDayUsage,
+    sevenDayRate,
+    weightedRate,
+    isFallback: !weightTotal && inputNumberOrNull(fallbackDailyTokens) !== null,
+  };
+}
+
+function quotaSnapshotDay(snapshot) {
+  const nameMatch = snapshot?.file?.name?.match(/(\d{4}-\d{2}-\d{2})/);
+  if (nameMatch) return nameMatch[1];
+  const date = new Date(snapshot?.fetchedAt || snapshot?.file?.modifiedAt || 0);
+  return Number.isNaN(date.getTime()) ? null : localDateKey(date);
+}
+
+function longestQuotaWindow(snapshot) {
+  const windows = Array.isArray(snapshot?.windows) ? snapshot.windows : [];
+  return windows
+    .filter((window) => Number.isFinite(Number(window?.usedPercent)))
+    .slice()
+    .sort((a, b) => (Number(b.windowDurationMins) || 0) - (Number(a.windowDurationMins) || 0))[0] || null;
+}
+
+function accountQuotaSummary(snapshot) {
+  const window = longestQuotaWindow(snapshot);
+  if (window) {
+    const used = clamp(Number(window.usedPercent), 0, 100);
+    return {
+      type: "percent",
+      label: window.label || window.name || "账户窗口",
+      used,
+      remaining: Math.max(0, 100 - used),
+      resetAt: window.resetsAt || null,
+      windowDurationMins: Number(window.windowDurationMins) || null,
+    };
+  }
+
+  const quota = snapshot?.quota;
+  if (quota && Number.isFinite(Number(quota.used)) && Number.isFinite(Number(quota.limit))) {
+    const limit = Math.max(Number(quota.limit), 0);
+    const used = Math.max(Number(quota.used), 0);
+    return {
+      type: "plan-units",
+      label: quota.unit || "计划用量",
+      used,
+      remaining: Number.isFinite(Number(quota.remaining)) ? Math.max(Number(quota.remaining), 0) : Math.max(limit - used, 0),
+      limit,
+      resetAt: snapshot?.billingCycleEnd || null,
+      periodStart: snapshot?.billingCycleStart || null,
+    };
+  }
+  return null;
+}
+
+function leastSquares(points) {
+  if (points.length < 3) return null;
+  const meanX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+  const meanY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+  const denominator = points.reduce((sum, point) => sum + (point.x - meanX) ** 2, 0);
+  if (denominator <= 0) return null;
+  const slope = points.reduce((sum, point) => sum + (point.x - meanX) * (point.y - meanY), 0) / denominator;
+  const intercept = meanY - slope * meanX;
+  const totalVariance = points.reduce((sum, point) => sum + (point.y - meanY) ** 2, 0);
+  const residualVariance = points.reduce((sum, point) => sum + (point.y - (intercept + slope * point.x)) ** 2, 0);
+  return {
+    slope,
+    intercept,
+    rSquared: totalVariance > 0 ? 1 - residualVariance / totalVariance : 1,
+    sampleCount: points.length,
+  };
+}
+
+function quotaWindowPoints(quotaData) {
+  const observations = Array.isArray(quotaData?.observations) ? quotaData.observations : [];
+  const latestObservation = observations.at(-1);
+  if (latestObservation) {
+    const segment = [latestObservation];
+    for (let index = observations.length - 2; index >= 0; index -= 1) {
+      const previous = observations[index];
+      const current = segment[0];
+      const previousReset = previous.resetAt ? new Date(previous.resetAt).getTime() : null;
+      const currentReset = current.resetAt ? new Date(current.resetAt).getTime() : null;
+      const resetMatches = previousReset === null && currentReset === null
+        ? true
+        : previousReset !== null && currentReset !== null && Math.abs(previousReset - currentReset) <= 5 * 60 * 1000;
+      const quotaMonotonic = Number(current.usedPercent) + 0.5 >= Number(previous.usedPercent);
+      const usageMonotonic =
+        current.totalTokens === null ||
+        previous.totalTokens === null ||
+        Number(current.totalTokens) >= Number(previous.totalTokens);
+      if (previous.windowName !== latestObservation.windowName || !resetMatches || !quotaMonotonic || !usageMonotonic) break;
+      segment.unshift(previous);
+    }
+    return segment
+      .filter((observation) => Number.isFinite(Number(observation.usedPercent)))
+      .map((observation) => ({
+        day: String(observation.fetchedAt || "").slice(0, 10),
+        fetchedAt: observation.fetchedAt,
+        window: {
+          name: observation.windowName,
+          label: observation.windowLabel,
+          usedPercent: Number(observation.usedPercent),
+          resetsAt: observation.resetAt,
+          windowDurationMins: observation.windowDurationMins,
+        },
+        usageTotalTokens: Number.isFinite(Number(observation.totalTokens)) ? Number(observation.totalTokens) : null,
+        modelTotals: observation.models || {},
+        segment: observation.segment,
+        observation: true,
+      }))
+      .sort((a, b) => String(a.fetchedAt).localeCompare(String(b.fetchedAt)));
+  }
+  if (!quotaData?.daily?.length) return [];
+  const latest = quotaData.latest;
+  const latestWindow = longestQuotaWindow(latest);
+  if (!latestWindow?.resetsAt) return [];
+  const windowName = latestWindow.name;
+  const resetAt = latestWindow.resetsAt;
+  return quotaData.daily
+    .map((snapshot) => ({ snapshot, day: quotaSnapshotDay(snapshot) }))
+    .filter((item) => item.day && item.day <= localDateKey())
+    .map((item) => ({ ...item, window: (item.snapshot.windows || []).find((window) => window.name === windowName) }))
+    .filter((item) => item.window?.resetsAt === resetAt && Number.isFinite(Number(item.window.usedPercent)))
+    .sort((a, b) => a.day.localeCompare(b.day));
+}
+
+function fitQuotaBurn(days, quotaData, account, dailyTokenRate) {
+  if (!account || account.type !== "percent" || !quotaData?.daily?.length || !dailyTokenRate) return null;
+  const points = quotaWindowPoints(quotaData);
+  if (points.length < 3) return { sampleCount: points.length, requiredSamples: 3, model: null };
+
+  const firstDay = points[0].day;
+  const observationMode = points.every((point) => Number.isFinite(point.usageTotalTokens));
+  const usageBaseline = observationMode ? points[0].usageTotalTokens : null;
+  const regression = leastSquares(
+    points.map((point) => ({
+      x: observationMode
+        ? Math.max(0, point.usageTotalTokens - usageBaseline)
+        : usageForDateRange(days, firstDay, point.day),
+      y: Number(point.window.usedPercent),
+    }))
+  );
+  if (!regression || regression.slope <= 0) {
+    return { sampleCount: points.length, requiredSamples: 3, model: null };
+  }
+  const percentPerDay = regression.slope * dailyTokenRate;
+  const runwayDays = percentPerDay > 0 ? account.remaining / percentPerDay : null;
+  return {
+    sampleCount: points.length,
+    requiredSamples: 3,
+    model: regression,
+    observationMode,
+    percentPerDay,
+    runwayDays,
+  };
+}
+
+function buildForecast(agent) {
+  const plan = forecastPlan(agent);
+  const snapshot = forecastSnapshots[agent] || {};
+  const days = localUsageDays(snapshot);
+  const today = localDateKey();
+  const periodEnd = /^\d{4}-\d{2}-\d{2}$/.test(plan.periodEndsOn || "") ? plan.periodEndsOn : null;
+  const cycleDays = clamp(Math.round(inputNumberOrNull(plan.cycleDays) || 7), 1, 90);
+  const periodStart = periodEnd ? addDays(periodEnd, -(cycleDays - 1)) : null;
+  const usablePeriodEnd = periodEnd && periodEnd < today ? periodEnd : today;
+  const periodDays = periodStart && usablePeriodEnd && periodStart <= usablePeriodEnd
+    ? days.filter((day) => {
+        const key = dayKey(day);
+        return key && key >= periodStart && key <= usablePeriodEnd;
+      })
+    : [];
+  const hasLocalUsage = periodDays.length > 0;
+  const localUsed = usageForDateRange(periodDays, periodStart, usablePeriodEnd);
+  const fallbackUsed = inputNumberOrNull(plan.fallbackUsedTokens);
+  const usedTokens = hasLocalUsage ? localUsed : fallbackUsed;
+  const quotaData = forecastQuotas[agent] || null;
+  const account = accountQuotaSummary(quotaData?.latest);
+  const rawRate = buildForecastRate(days, plan.fallbackDailyTokens);
+  const rawQuotaFit = fitQuotaBurn(days, quotaData, account, rawRate.weightedRate);
+  const modelFit = globalThis.ForecastModel?.fitModelWeights(
+    days,
+    quotaWindowPoints(quotaData).map((point) => ({
+      day: point.day,
+      fetchedAt: point.fetchedAt,
+      usedPercent: Number(point.window.usedPercent),
+      totalTokens: point.usageTotalTokens,
+      modelTotals: point.modelTotals,
+    })),
+    rawQuotaFit?.model?.slope
+  ) || { active: false, sampleCount: rawQuotaFit?.sampleCount || 0, requiredSamples: 7, reason: "model-module-unavailable", weights: [] };
+  const effectiveDays = modelFit.active ? globalThis.ForecastModel.applyModelWeights(days, modelFit) : days;
+  const rate = modelFit.active ? buildForecastRate(effectiveDays, plan.fallbackDailyTokens) : rawRate;
+  const quotaFit = modelFit.active ? fitQuotaBurn(effectiveDays, quotaData, account, rate.weightedRate) : rawQuotaFit;
+  const budgetTokens = inputNumberOrNull(plan.budgetTokens);
+  const remainingTokens = budgetTokens === null || usedTokens === null ? null : Math.max(budgetTokens - usedTokens, 0);
+  const daysUntilEnd = periodEnd ? Math.max(0, (dayDistance(today, periodEnd) ?? -1) + 1) : null;
+  const targetDailyTokens = remainingTokens !== null && daysUntilEnd && daysUntilEnd > 0 ? remainingTokens / daysUntilEnd : null;
+  const manualExhaustionDays = remainingTokens !== null && rate.weightedRate > 0 ? remainingTokens / rate.weightedRate : null;
+  const exhaustionDays = quotaFit?.model && Number.isFinite(quotaFit.runwayDays) ? quotaFit.runwayDays : manualExhaustionDays;
+  const predictedEnd = exhaustionDays === null ? null : addDays(today, Math.ceil(exhaustionDays));
+  const projectedTokens = budgetTokens !== null && usedTokens !== null && daysUntilEnd !== null
+    ? usedTokens + (rate.weightedRate || 0) * daysUntilEnd
+    : null;
+
+  return {
+    agent,
+    meta: FORECAST_AGENT_META[agent] || { label: agent },
+    snapshot,
+    plan,
+    days,
+    effectiveDays,
+    rawRate,
+    rate,
+    modelFit,
+    quotaData,
+    account,
+    quotaFit,
+    today,
+    periodStart,
+    periodEnd,
+    cycleDays,
+    hasLocalUsage,
+    usedTokens,
+    budgetTokens,
+    remainingTokens,
+    daysUntilEnd,
+    targetDailyTokens,
+    exhaustionDays,
+    predictedEnd,
+    projectedTokens,
+  };
+}
+
+function renderForecastMetric(label, value, sub) {
+  const node = els.metricTemplate.content.firstElementChild.cloneNode(true);
+  node.querySelector(".metric-label").textContent = label;
+  node.querySelector(".metric-value").textContent = value;
+  node.querySelector(".metric-sub").textContent = sub;
+  els.forecastMetricGrid.appendChild(node);
+}
+
+function formatAccountTime(value) {
+  if (!value) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "--";
+  return date.toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatAccountWindow(windowDurationMins) {
+  const minutes = Number(windowDurationMins);
+  if (!Number.isFinite(minutes) || minutes <= 0) return "额度窗口";
+  if (minutes >= 1440) return `${Math.round(minutes / 1440)} 天账期`;
+  if (minutes >= 60) return `${Math.round(minutes / 60)} 小时窗口`;
+  return `${Math.round(minutes)} 分钟窗口`;
+}
+
+function appendRunwayStat(container, label, value) {
+  const stat = document.createElement("div");
+  stat.className = "runway-stat";
+  stat.innerHTML = `<p class="runway-stat-label">${escapeHtml(label)}</p><div class="runway-stat-value">${escapeHtml(value)}</div>`;
+  container.appendChild(stat);
+}
+
+function modelWeightSummary(modelFit) {
+  if (!modelFit?.active) return "";
+  return modelFit.weights
+    .filter((item) => item.name !== "other-models" || Math.abs(item.weight - 1) > 0.01)
+    .map((item) => `${item.name === "other-models" ? "其他模型" : item.name} x${item.weight.toFixed(2)}`)
+    .join(" · ");
+}
+
+function modelFitStatus(modelFit) {
+  if (modelFit?.active) return `模型权重已启用：${modelWeightSummary(modelFit) || "各模型接近基准权重"}`;
+  const sampleCount = modelFit?.sampleCount || 0;
+  const requiredSamples = modelFit?.requiredSamples || 7;
+  if (sampleCount < requiredSamples) return `模型等效 Token 等待 ${sampleCount} / ${requiredSamples} 个同周期观测点`;
+  if (modelFit?.reason === "stable-model-mix") return "模型占比变化不足，暂时无法可靠区分模型权重";
+  if (modelFit?.reason === "single-model-mix") return "当前周期只有一个主要模型，不需要模型换算";
+  return "模型权重尚未通过稳定性检查，继续使用原始 Token";
+}
+
+function renderAccountRunway(forecast) {
+  const account = forecast.account;
+  const fit = forecast.quotaFit;
+  els.forecastRunwayTitle.textContent = `${forecast.meta.label} 官方额度窗口`;
+  els.forecastPeriodPill.textContent = account.type === "percent"
+    ? `${formatAccountWindow(account.windowDurationMins)} · 重置 ${formatAccountTime(account.resetAt)}`
+    : `账期至 ${formatAccountTime(account.resetAt)}`;
+
+  const summary = document.createElement("div");
+  summary.className = "runway-summary";
+  if (account.type === "percent") {
+    appendRunwayStat(summary, "已用额度", `${account.used.toFixed(0)}%`);
+    appendRunwayStat(summary, "可用额度", `${account.remaining.toFixed(0)}%`);
+    appendRunwayStat(summary, "拟合燃烧率", fit?.model ? `${fit.percentPerDay.toFixed(1)}% / 日` : "采样中");
+  } else {
+    appendRunwayStat(summary, "已用计划单位", formatNumber(account.used));
+    appendRunwayStat(summary, "剩余计划单位", formatNumber(account.remaining));
+    appendRunwayStat(summary, "计划上限", formatNumber(account.limit));
+  }
+  els.forecastRunway.appendChild(summary);
+
+  const total = account.type === "percent" ? 100 : Math.max(account.limit, 1);
+  const usedRatio = clamp(account.used / total, 0, 1);
+  const track = document.createElement("div");
+  track.className = "runway-track";
+  const usedSegment = document.createElement("div");
+  usedSegment.className = "runway-used";
+  usedSegment.style.width = `${usedRatio * 100}%`;
+  const remainingSegment = document.createElement("div");
+  remainingSegment.className = "runway-remaining";
+  remainingSegment.style.width = `${Math.max(0, 100 - usedRatio * 100)}%`;
+  track.append(usedSegment, remainingSegment);
+
+  const trackWrap = document.createElement("div");
+  trackWrap.className = "runway-track-wrap";
+  if (account.type === "percent" && fit?.model && account.resetAt) {
+    const remainingDays = Math.max(0, (new Date(account.resetAt).getTime() - Date.now()) / 86400000);
+    const projected = clamp(account.used + fit.percentPerDay * remainingDays, 0, 100);
+    const marker = document.createElement("div");
+    marker.className = "runway-marker is-end";
+    marker.style.left = `${projected}%`;
+    marker.innerHTML = `<span class="runway-marker-label">重置时预测 ${escapeHtml(`${projected.toFixed(0)}%`)}</span>`;
+    trackWrap.appendChild(marker);
+  }
+  trackWrap.appendChild(track);
+  els.forecastRunway.appendChild(trackWrap);
+
+  const dates = document.createElement("div");
+  dates.className = "runway-dates";
+  const cursorBreakdown = forecast.agent === "cursor" ? forecast.quotaData?.latest?.cursorUsageBreakdown : null;
+  const cursorDetails = cursorBreakdown
+    ? ` · Auto + Composer ${Number(cursorBreakdown.autoPercentUsed || 0).toFixed(0)}% · API ${Number(cursorBreakdown.apiPercentUsed || 0).toFixed(0)}%`
+    : "";
+  dates.innerHTML = `<span>${escapeHtml(`${account.label}${cursorDetails}`)}</span><span>重置 ${escapeHtml(formatAccountTime(account.resetAt))}</span>`;
+  els.forecastRunway.appendChild(dates);
+
+  if (account.type === "percent" && fit?.model) {
+    const tokenBasis = forecast.modelFit?.active ? "模型等效 Token" : "原始 Token";
+    const segmentText = fit.observationMode ? "当前重置分段" : "同一额度窗口";
+    els.forecastAdvice.innerHTML = `<strong>最小二乘拟合已启用。</strong><span>基于${segmentText}内 ${fit.sampleCount} 个观测点，将${tokenBasis}增量拟合为官方额度百分比。${escapeHtml(modelFitStatus(forecast.modelFit))}；预计 ${escapeHtml(formatRunway(forecast.exhaustionDays))} 后耗尽。</span>`;
+  } else if (account.type === "percent") {
+    const count = fit?.sampleCount || 0;
+    const message = forecast.agent === "cursor"
+      ? "主进度使用 Cursor 设置页的 Included in Pro 总百分比；Auto + Composer 与 API 单独保留。已收集"
+      : "已收集";
+    els.forecastAdvice.innerHTML = `<strong>官方额度已同步。</strong><span>${message} ${count} / 3 个当前重置分段观测点；达到 3 个后先启用原始 Token 拟合。额度重置或已用比例回落会自动开启新分段。${escapeHtml(modelFitStatus(forecast.modelFit))}。</span>`;
+  } else {
+    els.forecastAdvice.innerHTML = `<strong>Cursor 账期已同步。</strong><span>账户计划单位与 token 不是已确认的一对一口径；保留原始已用、剩余和账期，待 Cursor 每日事件数据积累后再启用拟合。</span>`;
+  }
+}
+
+function renderForecastRunway(forecast) {
+  els.forecastRunway.replaceChildren();
+  els.forecastAdvice.replaceChildren();
+  if (forecast.account) {
+    renderAccountRunway(forecast);
+    return;
+  }
+  els.forecastRunwayTitle.textContent = `${forecast.meta.label} 本周期节奏`;
+  els.forecastPeriodPill.textContent = forecast.periodStart && forecast.periodEnd
+    ? `${formatDateKey(forecast.periodStart)} - ${formatDateKey(forecast.periodEnd)}`
+    : "等待周期配置";
+
+  if (forecast.budgetTokens === null || !forecast.periodEnd) {
+    els.forecastRunway.appendChild(emptyState("设置计划额度和周期结束日后生成耗尽预测"));
+    const advice = document.createElement("div");
+    advice.innerHTML = "<strong>预测需要周期基准。</strong><span>本地日志会自动计算已用量；计划额度与结束日需要你按自己的订阅周期填入。</span>";
+    els.forecastAdvice.appendChild(advice);
+    return;
+  }
+
+  const used = forecast.usedTokens || 0;
+  const remaining = forecast.remainingTokens || 0;
+  const projected = forecast.projectedTokens || used;
+  const target = forecast.targetDailyTokens;
+  const usedRatio = forecast.budgetTokens > 0 ? clamp(used / forecast.budgetTokens, 0, 1) : 0;
+  const projectedRatio = forecast.budgetTokens > 0 ? clamp(projected / forecast.budgetTokens, 0, 1) : 0;
+  const isOverBudget = used >= forecast.budgetTokens || projected > forecast.budgetTokens;
+
+  const summary = document.createElement("div");
+  summary.className = "runway-summary";
+  [
+    ["本周期已用", formatCompact(used)],
+    ["可用余额", formatCompact(remaining)],
+    ["建议日均", target === null ? "--" : formatCompact(target)],
+  ].forEach(([label, value]) => appendRunwayStat(summary, label, value));
+  els.forecastRunway.appendChild(summary);
+
+  const trackWrap = document.createElement("div");
+  trackWrap.className = "runway-track-wrap";
+  const marker = document.createElement("div");
+  marker.className = "runway-marker is-end";
+  marker.style.left = `${projectedRatio * 100}%`;
+  marker.innerHTML = `<span class="runway-marker-label">期末预测 ${escapeHtml(formatCompact(projected))}</span>`;
+  const track = document.createElement("div");
+  track.className = "runway-track";
+  const usedSegment = document.createElement("div");
+  usedSegment.className = `runway-used${isOverBudget ? " runway-over" : ""}`;
+  usedSegment.style.width = `${usedRatio * 100}%`;
+  const remainingSegment = document.createElement("div");
+  remainingSegment.className = "runway-remaining";
+  remainingSegment.style.width = `${Math.max(0, 100 - usedRatio * 100)}%`;
+  track.append(usedSegment, remainingSegment);
+  trackWrap.append(marker, track);
+  els.forecastRunway.appendChild(trackWrap);
+
+  const dates = document.createElement("div");
+  dates.className = "runway-dates";
+  dates.innerHTML = `<span>起始 ${escapeHtml(formatDateKey(forecast.periodStart))}</span><span>结束 ${escapeHtml(formatDateKey(forecast.periodEnd))}</span>`;
+  els.forecastRunway.appendChild(dates);
+
+  const advice = document.createElement("div");
+  if (forecast.usedTokens === null) {
+    advice.innerHTML = "<strong>没有可用已用量。</strong><span>此周期没有本地快照；可在右侧填写无日志时的已用 Token。</span>";
+  } else if (remaining <= 0) {
+    advice.innerHTML = "<strong>计划额度已用完。</strong><span>下一周期前建议暂停高 token 工作，或调整计划额度以反映实际可用量。</span>";
+  } else if (!forecast.rate.weightedRate) {
+    advice.innerHTML = "<strong>尚无法估算耗尽时间。</strong><span>导出本地日志后会计算速率；也可以填写无日志时的日均 Token。</span>";
+  } else if (forecast.daysUntilEnd !== null && forecast.exhaustionDays < forecast.daysUntilEnd) {
+    advice.innerHTML = `<strong>按当前节奏将提前耗尽。</strong><span>预计 ${escapeHtml(formatRunway(forecast.exhaustionDays))} 后用完，建议把日均控制在 ${escapeHtml(formatCompact(target || 0))} Token 以内。</span>`;
+  } else if (forecast.daysUntilEnd !== null) {
+    const leftover = Math.max(forecast.budgetTokens - projected, 0);
+    advice.innerHTML = `<strong>当前节奏可覆盖本周期。</strong><span>按预测到期末将剩余 ${escapeHtml(formatCompact(leftover))} Token；若希望接近用完，日均目标为 ${escapeHtml(formatCompact(target || 0))} Token。</span>`;
+  } else {
+    advice.innerHTML = `<strong>预计剩余可用 ${escapeHtml(formatRunway(forecast.exhaustionDays))}。</strong><span>请设置周期结束日，以获得按期末对齐的日均目标。</span>`;
+  }
+  els.forecastAdvice.appendChild(advice);
+}
+
+function renderForecastRates(forecast) {
+  els.forecastRateList.replaceChildren();
+  const rate = forecast.rate;
+  const adjusted = Boolean(forecast.modelFit?.active);
+  const tokenUnit = adjusted ? "等效 Token" : "Token";
+  const rows = [
+    {
+      label: "今天截至当前",
+      value: rate.todayRate,
+      caption: rate.todayRate ? `${formatCompact(rate.todayUsage)} ${tokenUnit} / ${rate.elapsedHours.toFixed(1)} 小时` : "今天暂无本地用量",
+    },
+    {
+      label: "近 3 日日均",
+      value: rate.threeDayRate,
+      caption: rate.threeDayRate ? `近 3 个自然日 ${formatCompact(rate.threeDayUsage)} ${tokenUnit}` : "近 3 日暂无本地用量",
+    },
+    {
+      label: "近 7 日日均",
+      value: rate.sevenDayRate,
+      caption: rate.sevenDayRate ? `近 7 个自然日 ${formatCompact(rate.sevenDayUsage)} ${tokenUnit}` : "近 7 日暂无本地用量",
+    },
+    {
+      label: adjusted ? "模型等效日均" : "综合预测日均",
+      value: rate.weightedRate,
+      caption: rate.isFallback
+        ? "使用手动日均兜底"
+        : adjusted
+          ? `原始 ${formatCompact(forecast.rawRate.weightedRate || 0)} / 日 · ${modelWeightSummary(forecast.modelFit)}`
+          : "今日、3 日和 7 日节奏加权",
+      weighted: true,
+    },
+  ];
+
+  rows.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = `forecast-rate-row${item.weighted ? " is-weighted" : ""}`;
+    row.innerHTML = `
+      <p class="forecast-rate-caption">${escapeHtml(item.label)}</p>
+      <div class="forecast-rate-value">${item.value ? `${escapeHtml(formatCompact(item.value))} / 日` : "--"}</div>
+      <p class="forecast-rate-caption">${escapeHtml(item.caption)}</p>
+    `;
+    els.forecastRateList.appendChild(row);
+  });
+}
+
+function syncForecastForm(agent = forecastAgent) {
+  const plan = forecastPlan(agent);
+  els.forecastSubscriptionPlan.value = [...els.forecastSubscriptionPlan.options].some(
+    (option) => option.value === plan.subscriptionPlan
+  )
+    ? plan.subscriptionPlan
+    : "Custom";
+  els.forecastBudgetTokens.value = plan.budgetTokens ?? "";
+  els.forecastAccountSync.checked = plan.accountSyncEnabled !== false;
+  els.forecastPeriodEnd.value = plan.periodEndsOn ?? "";
+  els.forecastCycleDays.value = plan.cycleDays ?? 7;
+  els.forecastFallbackUsed.value = plan.fallbackUsedTokens ?? "";
+  els.forecastFallbackDaily.value = plan.fallbackDailyTokens ?? "";
+}
+
+function renderForecast(agent = forecastAgent) {
+  const forecast = buildForecast(agent);
+  els.forecastMetricGrid.replaceChildren();
+  if (forecast.account) {
+    const account = forecast.account;
+    const fit = forecast.quotaFit;
+    const available = account.type === "percent"
+      ? `${account.remaining.toFixed(0)}%`
+      : `${formatNumber(account.remaining)} / ${formatNumber(account.limit)}`;
+    const used = account.type === "percent" ? `${account.used.toFixed(0)}%` : formatNumber(account.used);
+    renderForecastMetric("官方可用额度", available, `${account.label} · 重置 ${formatAccountTime(account.resetAt)}`);
+    renderForecastMetric("官方已用额度", used, forecast.quotaData?.latest?.provider || "账户快照");
+    renderForecastMetric(
+      forecast.modelFit?.active ? "模型等效日均" : "综合日均",
+      forecast.rate.weightedRate ? `${formatCompact(forecast.rate.weightedRate)} / 日` : "--",
+      forecast.modelFit?.active ? "账户额度反向学习模型权重" : forecast.rate.isFallback ? "手动日均" : "今日、3 日、7 日加权"
+    );
+    renderForecastMetric(
+      fit?.model ? "拟合耗尽" : "拟合样本",
+      fit?.model ? formatRunway(forecast.exhaustionDays) : `${fit?.sampleCount || 0} / 3`,
+      fit?.model
+        ? `R² ${fit.model.rSquared.toFixed(2)} · ${forecast.modelFit?.active ? "模型等效 Token" : "原始 Token"}`
+        : "全局刷新或定时同步会追加观测点"
+    );
+    els.forecastSourcePill.textContent = forecast.quotaData?.latest
+      ? `账户快照 · ${forecast.quotaData.latest.file?.name || "最新"}${forecast.modelFit?.active ? " · 模型校正" : ""}`
+      : "未发现账户快照";
+    renderForecastRunway(forecast);
+    renderForecastRates(forecast);
+    return;
+  }
+
+  const budgetLabel = forecast.budgetTokens === null ? "--" : formatCompact(forecast.budgetTokens);
+  const usageSub = forecast.budgetTokens === null || forecast.usedTokens === null
+    ? "等待周期额度与用量"
+    : `${formatPercent(forecast.usedTokens / Math.max(forecast.budgetTokens, 1))} 已使用`;
+  renderForecastMetric(
+    "计划额度",
+    budgetLabel,
+    forecast.periodEnd
+      ? `${forecast.plan.subscriptionPlan || "未设置方案"} · ${forecast.cycleDays} 天，结束 ${formatDateKey(forecast.periodEnd)}`
+      : `${forecast.plan.subscriptionPlan || "未设置方案"} · 请填写周期结束日`
+  );
+  renderForecastMetric("本周期已用", forecast.usedTokens === null ? "--" : formatCompact(forecast.usedTokens), forecast.hasLocalUsage ? "来自本地每日快照" : "使用无日志兜底值");
+  renderForecastMetric("综合日均", forecast.rate.weightedRate ? `${formatCompact(forecast.rate.weightedRate)} / 日` : "--", forecast.rate.isFallback ? "手动日均" : "今日、3 日、7 日加权");
+  renderForecastMetric("预计耗尽", forecast.exhaustionDays === null ? "--" : formatRunway(forecast.exhaustionDays), forecast.predictedEnd ? `预计 ${formatDateKey(forecast.predictedEnd)}` : usageSub);
+  els.forecastSourcePill.textContent = forecast.snapshot?.latestFile
+    ? `本地快照 · ${forecast.snapshot.latestFile.name}`
+    : forecast.rate.isFallback
+      ? "手动兜底数据"
+      : "未发现本地快照";
+  renderForecastRunway(forecast);
+  renderForecastRates(forecast);
+}
+
+function setForecastAgent(agent) {
+  forecastAgent = FORECAST_AGENT_META[agent] ? agent : "codex";
+  els.forecastAgentTabs.forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.forecastAgent === forecastAgent);
+  });
+  const snapshot = forecastSnapshots[forecastAgent];
+  els.sourcePath.textContent = snapshot?.latestFile ? snapshot.latestFile.path : snapshot?.logDir || `usage-logs/${forecastAgent}/daily`;
+  syncForecastForm(forecastAgent);
+  renderForecast(forecastAgent);
 }
 
 function tokenParts(usage) {
@@ -338,7 +1061,7 @@ function renderMetrics(days, totals, view, bundle = {}) {
     renderMetric("今日总用量", formatCompact(latestTotal), `${dayDate(latest)} · ${formatCost(dayCost(latest))}`);
     renderMetric("累计 Token", formatCompact(totalTokenCount), `最近 30 条记录 ${formatCompact(recentTotal)}`);
     renderMetric("近 30 日费用", formatCost(recentCost), `累计估算 ${formatCost(totalCost)}`);
-    renderMetric("活跃来源", `${sourceCount || activeAgentCount(days)} 个`, "Codex / Claude Code 本地日志");
+    renderMetric("活跃来源", `${sourceCount || activeAgentCount(days)} 个`, "Codex / Claude Code / Cursor 本地数据");
     return;
   }
 
@@ -644,6 +1367,7 @@ function renderOverviewSources(bundle) {
   const cards = [
     { key: "codex", label: "Codex", tone: "codex" },
     { key: "claude", label: "Claude Code", tone: "claude" },
+    { key: "cursor", label: "Cursor", tone: "cursor" },
   ];
 
   cards.forEach((card) => {
@@ -682,6 +1406,7 @@ function renderSourceStatus(payload) {
       <div class="source-status-lines">
         <span>${escapeHtml(source.command)}</span>
         <span>${source.fileCount} files · ${source.dailyCount} daily rows</span>
+        <span>${source.quotaSnapshotCount || 0} daily quota files · ${source.quotaObservationCount || 0} reset-segment observations${source.quotaLatest ? ` · ${escapeHtml(source.quotaLatest.file?.name || "latest")}` : ""}</span>
         <span title="${escapeHtml(source.primaryLogDir)}">${escapeHtml(source.primaryLogDir)}</span>
       </div>
     `;
@@ -715,11 +1440,15 @@ function renderUsage(data, view, bundle = {}) {
 
 function setViewVisibility(view) {
   const isSources = view === "sources";
+  const isForecast = view === "forecast";
+  const isUsageView = !isSources && !isForecast;
   const showReset = view === "overview" || view === "codex";
+  els.forecastView.classList.toggle("is-hidden", !isForecast);
+  els.metricGrid.classList.toggle("is-hidden", isForecast);
   els.sourceCompare.classList.toggle("is-hidden", !(view === "overview" || isSources));
-  els.detailGrid.classList.toggle("is-hidden", isSources);
-  els.lowerGrid.classList.toggle("is-hidden", isSources);
-  els.tablePanel.classList.toggle("is-hidden", isSources);
+  els.detailGrid.classList.toggle("is-hidden", !isUsageView);
+  els.lowerGrid.classList.toggle("is-hidden", !isUsageView);
+  els.tablePanel.classList.toggle("is-hidden", !isUsageView);
   els.resetCredits.classList.toggle("is-hidden", !showReset);
 }
 
@@ -735,6 +1464,18 @@ async function fetchUsage(source) {
   return response.json();
 }
 
+async function fetchQuota(source) {
+  const response = await fetch(`/api/quota?source=${encodeURIComponent(source)}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+async function fetchForecastSettings() {
+  const response = await fetch("/api/forecast-settings", { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
 async function loadSourcesView() {
   setStatus("正在读取数据源状态...");
   const response = await fetch("/api/sources", { cache: "no-store" });
@@ -742,14 +1483,34 @@ async function loadSourcesView() {
   const data = await response.json();
   const sources = data.sources || [];
   const ready = sources.filter((source) => source.latestFile).length;
-  els.sourcePath.textContent = "usage-logs/{codex,claude,all}/daily";
+  els.sourcePath.textContent = "usage-logs/{codex,claude,cursor,all}/daily";
   els.metricGrid.replaceChildren();
-  renderMetric("数据源", `${sources.length} 个`, "Codex / Claude Code / All");
+  renderMetric("数据源", `${sources.length} 个`, "Codex / Claude Code / Cursor / All");
   renderMetric("已有快照", `${ready} 个`, "至少导出一次后显示");
   renderMetric("计划任务", "12:00", "默认每天中午导出");
   renderMetric("存储位置", "项目内", "同一天刷新覆盖同名 JSON");
   renderSourceStatus(data);
   setStatus(`已读取 ${sources.length} 个数据源状态`, "ok");
+}
+
+async function loadForecastView() {
+  setStatus("正在读取预测数据与周期配置...");
+  const [settingsPayload, codex, claude, cursor, codexQuota, claudeQuota, cursorQuota] = await Promise.all([
+    fetchForecastSettings(),
+    fetchUsage("codex"),
+    fetchUsage("claude"),
+    fetchUsage("cursor"),
+    fetchQuota("codex"),
+    fetchQuota("claude"),
+    fetchQuota("cursor"),
+  ]);
+  forecastSettings = settingsPayload.settings || { version: 1, agents: {} };
+  forecastSnapshots = { codex, claude, cursor };
+  forecastQuotas = { codex: codexQuota, claude: claudeQuota, cursor: cursorQuota };
+  setForecastAgent(forecastAgent);
+  const ready = Object.values(forecastSnapshots).filter((snapshot) => snapshot?.latestFile).length;
+  const quotaReady = Object.values(forecastQuotas).filter((quota) => quota?.latest).length;
+  setStatus(`已读取 ${ready} 个本地用量来源、${quotaReady} 个账户额度快照`, ready || quotaReady ? "ok" : "loading");
 }
 
 async function loadView(view = currentView) {
@@ -764,15 +1525,21 @@ async function loadView(view = currentView) {
       return;
     }
 
+    if (currentView === "forecast") {
+      await loadForecastView();
+      return;
+    }
+
     setStatus(`正在读取 ${config.label} JSON...`);
 
     if (currentView === "overview") {
-      const [all, codex, claude] = await Promise.all([
+      const [all, codex, claude, cursor] = await Promise.all([
         fetchUsage("all"),
         fetchUsage("codex"),
         fetchUsage("claude"),
+        fetchUsage("cursor"),
       ]);
-      renderUsage(all, "overview", { codex, claude });
+      renderUsage(all, "overview", { codex, claude, cursor });
       setStatus(all.latestFile ? `已读取总览 ${all.latestFile.name}` : "未发现总览导出文件", all.latestFile ? "ok" : "loading");
       return;
     }
@@ -830,6 +1597,47 @@ async function exportAndRefresh(scope = "current") {
   }
 }
 
+async function saveForecastPlan(event) {
+  event.preventDefault();
+  const currentSettings = forecastSettings || { version: 1, agents: {} };
+  const plan = {
+    subscriptionPlan: els.forecastSubscriptionPlan.value,
+    accountSyncEnabled: els.forecastAccountSync.checked,
+    budgetTokens: inputNumberOrNull(els.forecastBudgetTokens.value),
+    periodEndsOn: /^\d{4}-\d{2}-\d{2}$/.test(els.forecastPeriodEnd.value) ? els.forecastPeriodEnd.value : null,
+    cycleDays: clamp(Math.round(inputNumberOrNull(els.forecastCycleDays.value) || 7), 1, 90),
+    fallbackUsedTokens: inputNumberOrNull(els.forecastFallbackUsed.value),
+    fallbackDailyTokens: inputNumberOrNull(els.forecastFallbackDaily.value),
+  };
+  const payload = {
+    version: 1,
+    agents: {
+      ...(currentSettings.agents || {}),
+      [forecastAgent]: plan,
+    },
+  };
+
+  els.forecastSaveBtn.disabled = true;
+  setStatus(`正在保存 ${FORECAST_AGENT_META[forecastAgent].label} 周期配置...`);
+  try {
+    const response = await fetch("/api/forecast-settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    forecastSettings = data.settings;
+    syncForecastForm(forecastAgent);
+    renderForecast(forecastAgent);
+    setStatus(`已保存 ${FORECAST_AGENT_META[forecastAgent].label} 周期配置`, "ok");
+  } catch (error) {
+    setStatus(`周期配置保存失败：${error.message}`, "error");
+  } finally {
+    els.forecastSaveBtn.disabled = false;
+  }
+}
+
 els.viewTabs.forEach((tab) => {
   tab.addEventListener("click", () => {
     const view = tab.dataset.view || "overview";
@@ -837,6 +1645,14 @@ els.viewTabs.forEach((tab) => {
     loadView(view);
   });
 });
+
+els.forecastAgentTabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    setForecastAgent(tab.dataset.forecastAgent || "codex");
+  });
+});
+
+els.forecastForm.addEventListener("submit", saveForecastPlan);
 
 els.refreshBtn.addEventListener("click", () => exportAndRefresh("everything"));
 els.exportBtn.addEventListener("click", () => exportAndRefresh("everything"));

@@ -13,13 +13,15 @@
 
 ## 功能
 
-- 总览页：Codex + Claude Code 总 token、近 30 日费用、总趋势、来源对比
+- 总览页：Codex + Claude Code + Cursor 的来源对比、总 token、近 30 日费用和总趋势
+- 额度预测页：按来源显示官方账户额度窗口、真实重置时间、token 消耗速率和预测耗尽时间
 - Codex 页：Codex 每日趋势、Token 构成、模型分布、快照和明细
 - Claude Code 页：Claude Code 每日趋势、Token 构成、模型分布、快照和明细
-- 数据源页：查看 Codex / Claude / All 三个导出源是否有快照、日志目录和行数
+- Cursor 页：Cursor usage events 聚合的独立每日 token 展示；账户账期与计划用量在额度预测页同步
+- 数据源页：查看 Codex / Claude / Cursor / All 四个导出源、日志目录和账户额度快照
 - Codex reset credits：读取本机 Codex 凭证后显示可用次数和有效期
-- 一键全部导出：同时导出 Codex、Claude Code 和 all-agent 聚合 JSON
-- 支持 Windows 每日计划任务，默认每天中午 12 点导出
+- 一键全部导出：同时导出 Codex、Claude Code、all-agent 聚合 JSON，并同步账户额度快照
+- 支持 Windows 每日计划任务，默认每天中午 12 点导出并同步账户额度
 - 提供可双击启动脚本
 
 ## 前置要求
@@ -102,6 +104,10 @@ open-dashboard.bat
 .\usage-logs\codex\daily\codex-usage-YYYY-MM-DD.json
 .\usage-logs\claude\daily\claude-usage-YYYY-MM-DD.json
 .\usage-logs\all\daily\all-usage-YYYY-MM-DD.json
+.\usage-logs\quota-snapshots\codex\quota-codex-YYYY-MM-DD.json
+.\usage-logs\quota-snapshots\claude\quota-claude-YYYY-MM-DD.json
+.\usage-logs\quota-snapshots\cursor\quota-cursor-YYYY-MM-DD.json
+.\usage-logs\quota-observations\{codex,claude,cursor}\quota-observations-YYYY-MM-DD.json
 ```
 
 `npx` 缓存默认保存到：
@@ -119,6 +125,10 @@ open-dashboard.bat
 ```
 
 所以一天内多次刷新不会生成一堆重复 JSON。长期保存时最多按来源每天一个文件。
+
+账户额度快照也按同一规则保存：同一天内无论浏览器刷新还是计划任务运行，都会覆盖该来源当天的 `quota-*.json`。这些快照只保存已经汇总后的百分比、重置时间、账期和计划用量，不保存 access token、cookie、邮箱或账户 ID。
+
+为了识别同一天内的额度重置，项目还会写入紧凑的 `quota-observations-YYYY-MM-DD.json`。每个来源每天仍只有一个观测文件，内部观测点会去重并限制为最多 96 条，只保留最近 120 天。观测点仅含额度窗口、分段编号、汇总 Token 和模型汇总，不含凭证、原始请求、会话内容或账户 ID。
 
 旧版本的 Codex 快照目录：
 
@@ -210,6 +220,34 @@ WebUI 顶部有四个视图：
 
 首次打开页面只会读取本地已有 JSON，不会自动运行导出命令。这样可以避免每次打开浏览器都启动 `npx`；需要最新数据时再手动点击刷新。
 
+点击刷新图标或 `全部导出` 时会统一执行：
+
+1. 导出 Codex、Claude Code 和 all-agent 的当日 token 快照。
+2. 同步 Codex、Claude Code 和 Cursor 的账户额度快照。
+3. 重新读取当前页面，因此无论停留在哪个标签页都会看到同一轮最新数据。
+
+在“额度预测”页可以分别选择 Codex、Claude Code 或 Cursor。`刷新时同步账户额度` 默认开启；关闭后，该来源的浏览器刷新和每日计划任务都不会读取其账户凭证或发起账户用量请求。
+
+## 额度预测与自动周期
+
+Codex、Claude Code 和 Cursor 的周期优先从账户数据自动读取，不需要手动填写结束日：
+
+- Codex：通过本机 `codex app-server` 的 `account/rateLimits/read` 读取短窗口、长窗口、已用百分比和重置时间。
+- Claude Code：从本机 `~\.claude\.credentials.json` 的 Claude OAuth 登录态读取账户 usage 窗口；请求只发送到 `https://api.anthropic.com/api/oauth/usage`。
+- Cursor：从 Windows Cursor 本地 `state.vscdb` 读取会话凭证，请求 `https://cursor.com/api/usage-summary` 获得账期，并以 Cursor 设置页同口径的 `Included in Pro`、`Auto + Composer`、`API` 百分比作为额度主统计；旧的计划单位只保留为诊断数据。同步还会通过 usage events 接口汇总最近 90 天的每日 token 快照。
+
+三种凭证均只在本机内存中用于对应官方账户请求，服务端不会返回或写入 access token、refresh token、cookie、邮箱或完整账户 ID。网络不可用、凭证失效、Cursor 未登录，或接口结构变更时，预测页会保留最近快照并显示同步失败；你仍可使用页面里的手动 Token 预算作为后备。
+
+预测分为三个阶段：
+
+1. 当前重置分段少于 3 个观测点：显示账户当前剩余额度、真实重置时间，以及“今日截至当前 / 近 3 日 / 近 7 日”的原始 Token 加权日均。
+2. 同一重置分段达到至少 3 个观测点：对观测点之间的 Token 增量与官方已用百分比做最小二乘拟合，得到实际 `百分比 / Token` 扣减系数、预计耗尽时间和 `R²`。
+3. 同一重置分段达到至少 7 个观测点，且模型占比有足够变化：使用带先验收缩和权重上下限的岭回归反向学习各模型的额度权重，再生成“模型等效 Token”日均。若样本不足、模型混合稳定或拟合质量下降，会自动退回原始 Token 单斜率，不输出不可靠的模型换算。
+
+当 `resetsAt` 改变、官方已用百分比明显下降，或本地累计计数回退时，会自动开启新的拟合分段。即使上午用完额度、当天手动重置后继续使用，重置前后的 Token 也不会混入同一条拟合曲线。
+
+Cursor 的账户百分比与 token 目前不保证一一对应，因此会同时显示官方账期、分项百分比和最近 90 天的每日 token 事件；在百分比与 token 的对应关系被账户数据稳定验证前，不把两者强行换算成固定 token 上限，避免错误预测。
+
 ## Codex reset credits 有效期
 
 页面会尝试读取本机 Codex 登录凭证：
@@ -249,6 +287,7 @@ reset credits 只属于 Codex / ChatGPT 口径，所以不会显示在 Claude Co
 │  ├─ export-daily.ps1
 │  ├─ open-dashboard.ps1
 │  ├─ register-daily-task.ps1
+│  ├─ sync-account-quotas.mjs
 │  └─ start-webui.ps1
 ├─ web
 │  ├─ app.js
@@ -257,7 +296,10 @@ reset credits 只属于 Codex / ChatGPT 口径，所以不会显示在 Claude Co
 ├─ usage-logs
 │  ├─ codex
 │  ├─ claude
-│  └─ all
+│  ├─ cursor
+│  ├─ all
+│  ├─ quota-snapshots
+│  └─ quota-observations
 └─ .npm-cache
 ```
 

@@ -9,7 +9,8 @@
     "export:codex": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/export-daily.ps1 -Source codex",
     "export:claude": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/export-daily.ps1 -Source claude",
     "export:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/export-daily.ps1 -Source all",
-    "task:register": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/register-daily-task.ps1"
+    "task:register": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/register-daily-task.ps1",
+    "test": "node --no-warnings --test tests/*.test.js"
   },
   "engines": {
     "node": ">=22"

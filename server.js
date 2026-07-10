@@ -8,6 +8,11 @@ const ROOT = __dirname;
 const WEB_ROOT = path.join(ROOT, "web");
 const CODEX_AUTH_PATH = process.env.CODEX_AUTH_PATH || path.join(os.homedir(), ".codex", "auth.json");
 const DEFAULT_PORT = 8787;
+const USAGE_LOG_ROOT = process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs");
+const FORECAST_SETTINGS_PATH = process.env.FORECAST_SETTINGS_PATH || path.join(USAGE_LOG_ROOT, "forecast-settings.json");
+const QUOTA_SNAPSHOT_ROOT = process.env.QUOTA_SNAPSHOT_DIR || path.join(USAGE_LOG_ROOT, "quota-snapshots");
+const QUOTA_OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || path.join(USAGE_LOG_ROOT, "quota-observations");
+const FORECAST_AGENTS = ["codex", "claude", "cursor"];
 
 const SOURCE_CONFIGS = {
   codex: {
@@ -16,7 +21,7 @@ const SOURCE_CONFIGS = {
     command: ["codex", "daily"],
     logRoot:
       process.env.CODEX_USAGE_LOG_DIR ||
-      path.join(process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs"), "codex", "daily"),
+      path.join(USAGE_LOG_ROOT, "codex", "daily"),
     legacyRoots: [path.join(ROOT, "codex-usage-logs", "daily")],
   },
   claude: {
@@ -25,8 +30,19 @@ const SOURCE_CONFIGS = {
     command: ["claude", "daily"],
     logRoot:
       process.env.CLAUDE_USAGE_LOG_DIR ||
-      path.join(process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs"), "claude", "daily"),
+      path.join(USAGE_LOG_ROOT, "claude", "daily"),
     detectPath: path.join(os.homedir(), ".claude"),
+  },
+  cursor: {
+    label: "Cursor",
+    filePrefix: "cursor-usage",
+    command: null,
+    logRoot: process.env.CURSOR_USAGE_LOG_DIR || path.join(USAGE_LOG_ROOT, "cursor", "daily"),
+    detectPaths: [
+      path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Cursor"),
+      path.join(os.homedir(), ".cursor"),
+    ],
+    manualOnly: false,
   },
   all: {
     label: "All Agents",
@@ -34,7 +50,7 @@ const SOURCE_CONFIGS = {
     command: ["daily"],
     logRoot:
       process.env.ALL_USAGE_LOG_DIR ||
-      path.join(process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs"), "all", "daily"),
+      path.join(USAGE_LOG_ROOT, "all", "daily"),
   },
 };
 
@@ -49,6 +65,106 @@ const MIME = {
 };
 
 const exportInFlight = new Map();
+
+function asNonNegativeNumber(value, fallback = null) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function validDate(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+}
+
+function defaultForecastAgent(agent) {
+  return {
+    subscriptionPlan: agent === "codex" ? "ChatGPT Pro 5x" : agent === "claude" ? "Claude Max 5x" : "Cursor Pro",
+    accountSyncEnabled: true,
+    budgetTokens: null,
+    periodEndsOn: null,
+    cycleDays: 7,
+    fallbackUsedTokens: null,
+    fallbackDailyTokens: null,
+  };
+}
+
+function normalizeForecastAgent(value, agent) {
+  const defaultPlan = defaultForecastAgent(agent).subscriptionPlan;
+  return {
+    subscriptionPlan:
+      typeof value?.subscriptionPlan === "string" && value.subscriptionPlan.length <= 64
+        ? value.subscriptionPlan
+        : defaultPlan,
+    accountSyncEnabled: value?.accountSyncEnabled !== false,
+    budgetTokens: asNonNegativeNumber(value?.budgetTokens),
+    periodEndsOn: validDate(value?.periodEndsOn),
+    cycleDays: Math.min(90, Math.max(1, Math.round(asNonNegativeNumber(value?.cycleDays, 7)))),
+    fallbackUsedTokens: asNonNegativeNumber(value?.fallbackUsedTokens),
+    fallbackDailyTokens: asNonNegativeNumber(value?.fallbackDailyTokens),
+  };
+}
+
+function defaultForecastSettings() {
+  return {
+    version: 1,
+    agents: Object.fromEntries(FORECAST_AGENTS.map((agent) => [agent, defaultForecastAgent(agent)])),
+  };
+}
+
+function readForecastSettings() {
+  const defaults = defaultForecastSettings();
+  if (!fs.existsSync(FORECAST_SETTINGS_PATH)) return defaults;
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(FORECAST_SETTINGS_PATH, "utf8").replace(/^\uFEFF/, ""));
+    return {
+      version: 1,
+      agents: Object.fromEntries(
+        FORECAST_AGENTS.map((agent) => [agent, normalizeForecastAgent(parsed?.agents?.[agent], agent)])
+      ),
+    };
+  } catch (_) {
+    return defaults;
+  }
+}
+
+function writeForecastSettings(payload) {
+  const settings = {
+    version: 1,
+    agents: Object.fromEntries(
+      FORECAST_AGENTS.map((agent) => [agent, normalizeForecastAgent(payload?.agents?.[agent], agent)])
+    ),
+  };
+  fs.mkdirSync(path.dirname(FORECAST_SETTINGS_PATH), { recursive: true });
+  fs.writeFileSync(FORECAST_SETTINGS_PATH, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  return settings;
+}
+
+function readJsonBody(req, maxBytes = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    let tooLarge = false;
+
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      if (tooLarge) return;
+      body += chunk;
+      if (Buffer.byteLength(body, "utf8") > maxBytes) {
+        tooLarge = true;
+        reject(Object.assign(new Error("Request body is too large"), { statusCode: 413 }));
+      }
+    });
+    req.on("end", () => {
+      if (tooLarge) return;
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (_) {
+        reject(Object.assign(new Error("Invalid JSON request body"), { statusCode: 400 }));
+      }
+    });
+    req.on("error", reject);
+  });
+}
 
 function parseArgs() {
   const index = process.argv.findIndex((arg) => arg === "--port" || arg === "-p");
@@ -189,6 +305,82 @@ function listJsonFiles(dir) {
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
+function quotaSnapshots(source) {
+  if (!FORECAST_AGENTS.includes(source)) {
+    throw new Error(`Unknown quota source: ${source}`);
+  }
+
+  const logDir = path.join(QUOTA_SNAPSHOT_ROOT, source);
+  const observationLogDir = path.join(QUOTA_OBSERVATION_ROOT, source);
+  const files = listJsonFiles(logDir);
+  const daily = files
+    .map((file) => {
+      try {
+        const snapshot = JSON.parse(fs.readFileSync(file.path, "utf8").replace(/^\uFEFF/, ""));
+        return { ...snapshot, file: { name: file.name, modifiedAt: file.modifiedAt, size: file.size } };
+      } catch (_) {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(a.fetchedAt || a.file.modifiedAt) - new Date(b.fetchedAt || b.file.modifiedAt));
+  const observations = listJsonFiles(observationLogDir)
+    .flatMap((file) => {
+      try {
+        const payload = JSON.parse(fs.readFileSync(file.path, "utf8").replace(/^\uFEFF/, ""));
+        return Array.isArray(payload?.observations) ? payload.observations : [];
+      } catch (_) {
+        return [];
+      }
+    })
+    .sort((a, b) => new Date(a.fetchedAt || 0) - new Date(b.fetchedAt || 0));
+
+  return {
+    source,
+    logDir,
+    observationLogDir,
+    latest: daily.at(-1) || null,
+    daily,
+    observations,
+  };
+}
+
+function refreshAccountSnapshots() {
+  const script = path.join(ROOT, "scripts", "sync-account-quotas.mjs");
+  return new Promise((resolvePromise) => {
+    const child = spawn(process.execPath, ["--no-warnings", script, "--json"], {
+      cwd: ROOT,
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      resolvePromise({ ok: false, partial: false, error: error.message });
+    });
+    child.on("close", (code) => {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(stdout.trim());
+      } catch (_) {
+        parsed = null;
+      }
+      resolvePromise(
+        parsed || {
+          ok: false,
+          partial: false,
+          error: stderr || `Account quota sync failed with exit code ${code}`,
+        }
+      );
+    });
+  });
+}
+
 function latestUsageSnapshot(source = "codex") {
   const normalizedSource = normalizeSource(source);
   if (!normalizedSource) {
@@ -246,6 +438,10 @@ function exportUsageSnapshot(source = "codex") {
   const normalizedSource = normalizeSource(source);
   if (!normalizedSource) {
     return Promise.reject(new Error(`Unknown source: ${source}`));
+  }
+
+  if (!SOURCE_CONFIGS[normalizedSource].command) {
+    return Promise.reject(new Error(`${SOURCE_CONFIGS[normalizedSource].label} 暂无可用的本地自动导出器`));
   }
 
   if (exportInFlight.has(normalizedSource)) return exportInFlight.get(normalizedSource);
@@ -343,9 +539,10 @@ function runExport(req, res) {
 
   if (requestedSource === "everything") {
     exportEverything()
-      .then((result) => {
+      .then(async (result) => {
+        const quotaSync = await refreshAccountSnapshots();
         const allFailed = result.results.every((item) => !item.ok);
-        sendJson(res, allFailed ? 500 : 200, result);
+        sendJson(res, allFailed ? 500 : 200, { ...result, quotaSync });
       })
       .catch((error) => {
         sendJson(res, 500, { ok: false, error: error.message });
@@ -381,21 +578,29 @@ function runExport(req, res) {
 function sourceStatus() {
   return Object.entries(SOURCE_CONFIGS).map(([source, config]) => {
     const snapshot = latestUsageSnapshot(source);
+    const quota = FORECAST_AGENTS.includes(source) ? quotaSnapshots(source) : null;
+    const detected = config.detectPaths
+      ? config.detectPaths.some((detectPath) => fs.existsSync(detectPath))
+      : source === "claude"
+        ? fs.existsSync(config.detectPath)
+        : source === "codex"
+          ? fs.existsSync(CODEX_AUTH_PATH)
+          : true;
+
     return {
       source,
       label: config.label,
-      command: `ccusage ${config.command.join(" ")} --json`,
+        command: config.command ? `ccusage ${config.command.join(" ")} --json` : "Cursor 账户与 usage events 自动同步",
       logDir: snapshot.logDir,
       primaryLogDir: snapshot.primaryLogDir,
       fileCount: snapshot.files.length,
       latestFile: snapshot.latestFile,
       dailyCount: snapshot.daily.length,
-      detected:
-        source === "claude"
-          ? fs.existsSync(config.detectPath)
-          : source === "codex"
-            ? fs.existsSync(CODEX_AUTH_PATH)
-            : true,
+        quotaLatest: quota?.latest || null,
+        quotaSnapshotCount: quota?.daily.length || 0,
+        quotaObservationCount: quota?.observations.length || 0,
+        detected,
+      manualOnly: Boolean(config.manualOnly),
     };
   });
 }
@@ -440,6 +645,23 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    if (req.method === "GET" && req.url.startsWith("/api/quota")) {
+      const source = sourceFromUrl(req, "codex");
+      if (!source || !FORECAST_AGENTS.includes(source)) {
+        sendJson(res, 400, { ok: false, error: "Unknown quota source" });
+        return;
+      }
+      sendJson(res, 200, { ok: true, ...quotaSnapshots(source) });
+      return;
+    }
+
+    if (req.method === "POST" && req.url.startsWith("/api/account-sync")) {
+      refreshAccountSnapshots().then((result) => {
+        sendJson(res, result.ok || result.partial ? 200 : 500, result);
+      });
+      return;
+    }
+
     if (req.method === "GET" && req.url.startsWith("/api/sources")) {
       sendJson(res, 200, { ok: true, sources: sourceStatus() });
       return;
@@ -454,6 +676,25 @@ const server = http.createServer((req, res) => {
             message: error.message,
           });
         });
+      return;
+    }
+
+    if (req.url === "/api/forecast-settings") {
+      if (req.method === "GET") {
+        sendJson(res, 200, { ok: true, settings: readForecastSettings() });
+        return;
+      }
+
+      if (req.method === "PUT") {
+        readJsonBody(req)
+          .then((payload) => sendJson(res, 200, { ok: true, settings: writeForecastSettings(payload) }))
+          .catch((error) => {
+            sendJson(res, error.statusCode || 400, { ok: false, error: error.message });
+          });
+        return;
+      }
+
+      sendJson(res, 405, { ok: false, error: "Method not allowed" });
       return;
     }
 
@@ -473,5 +714,6 @@ server.listen(port, () => {
   console.log(`AI token dashboard: http://localhost:${port}`);
   console.log(`Codex logs: ${SOURCE_CONFIGS.codex.logRoot}`);
   console.log(`Claude logs: ${SOURCE_CONFIGS.claude.logRoot}`);
+  console.log(`Cursor logs: ${SOURCE_CONFIGS.cursor.logRoot}`);
   console.log(`All-agent logs: ${SOURCE_CONFIGS.all.logRoot}`);
 });
