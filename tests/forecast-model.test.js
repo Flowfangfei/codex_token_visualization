@@ -100,3 +100,56 @@ test("quota observation segmentation detects resets inside the same day", async 
     false
   );
 });
+
+test("segmented quota fit keeps historical intervals after a new cycle starts", () => {
+  const segments = [
+    [
+      { fetchedAt: "2026-07-01T08:00:00Z", usedPercent: 10, totalTokens: 100_000_000, modelTotals: { alpha: 100_000_000 } },
+      { fetchedAt: "2026-07-01T10:00:00Z", usedPercent: 20, totalTokens: 110_000_000, modelTotals: { alpha: 110_000_000 } },
+      { fetchedAt: "2026-07-01T12:00:00Z", usedPercent: 35, totalTokens: 125_000_000, modelTotals: { alpha: 125_000_000 } },
+    ],
+    [
+      { fetchedAt: "2026-07-08T08:00:00Z", usedPercent: 0, totalTokens: 130_000_000, modelTotals: { alpha: 130_000_000 } },
+    ],
+  ];
+  const intervals = ForecastModel.buildSegmentIntervals(segments);
+  const fit = ForecastModel.fitSegmentedQuota(intervals, { referenceTime: "2026-07-08T08:00:00Z" });
+
+  assert.equal(intervals.length, 2);
+  assert.equal(fit.intervalCount, 2);
+  assert.ok(fit.model);
+  assert.ok(Math.abs(fit.model.slope - 1e-6) < 1e-10);
+});
+
+test("segmented fit gives newer cycles more influence", () => {
+  const intervals = [
+    { segmentIndex: 0, endedAt: "2026-05-01T00:00:00Z", deltaTokens: 10_000_000, deltaPercent: 10 },
+    { segmentIndex: 0, endedAt: "2026-05-02T00:00:00Z", deltaTokens: 10_000_000, deltaPercent: 10 },
+    { segmentIndex: 1, endedAt: "2026-07-01T00:00:00Z", deltaTokens: 10_000_000, deltaPercent: 20 },
+    { segmentIndex: 1, endedAt: "2026-07-02T00:00:00Z", deltaTokens: 10_000_000, deltaPercent: 20 },
+  ];
+  const fit = ForecastModel.fitSegmentedQuota(intervals, { referenceTime: "2026-07-02T00:00:00Z", halfLifeDays: 28 });
+
+  assert.ok(fit.model.slope > 1.5e-6);
+  assert.equal(fit.segmentCount, 2);
+});
+
+test("learns model weights from intervals pooled across reset segments", () => {
+  const intervals = Array.from({ length: 8 }, (_, index) => {
+    const alpha = (8 - index) * 1_000_000;
+    const beta = (index + 1) * 1_000_000;
+    return {
+      segmentIndex: index < 4 ? 0 : 1,
+      endedAt: `2026-07-${String(index + 1).padStart(2, "0")}T12:00:00Z`,
+      deltaTokens: alpha + beta,
+      deltaPercent: alpha / 1_000_000 + (2 * beta) / 1_000_000,
+      modelDeltas: { alpha, beta },
+    };
+  });
+  const rawFit = ForecastModel.fitSegmentedQuota(intervals);
+  const modelFit = ForecastModel.fitModelWeightsFromIntervals(intervals, rawFit.model.slope);
+
+  assert.equal(modelFit.active, true);
+  assert.equal(modelFit.intervalMode, true);
+  assert.ok(modelFit.weightMap.beta > modelFit.weightMap.alpha * 1.2);
+});

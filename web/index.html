@@ -73,57 +73,6 @@
               <div class="forecast-runway" id="forecastRunway"></div>
               <div class="forecast-advice" id="forecastAdvice"></div>
             </article>
-
-            <article class="panel forecast-settings-panel">
-              <div class="panel-heading">
-                <div>
-                  <p class="section-label">Plan settings</p>
-                  <h2>周期配置</h2>
-                </div>
-              </div>
-              <form class="forecast-form" id="forecastForm">
-                <label class="field-label">
-                  <span>订阅方案</span>
-                  <select id="forecastSubscriptionPlan" name="subscriptionPlan">
-                    <option value="">未设置</option>
-                    <option value="ChatGPT Pro 5x">ChatGPT Pro 5x</option>
-                    <option value="Claude Max 5x">Claude Max 5x</option>
-                      <option value="Cursor">Cursor</option>
-                      <option value="Cursor Pro">Cursor Pro</option>
-                      <option value="Cursor Pro+">Cursor Pro+</option>
-                    <option value="Custom">自定义</option>
-                  </select>
-                </label>
-                <label class="sync-toggle">
-                  <input id="forecastAccountSync" name="accountSyncEnabled" type="checkbox" checked />
-                  <span>刷新时同步账户额度</span>
-                </label>
-                <label class="field-label">
-                  <span>计划额度 Token</span>
-                  <input id="forecastBudgetTokens" name="budgetTokens" type="number" min="0" step="1" inputmode="decimal" placeholder="例如 100000000" />
-                </label>
-                <label class="field-label">
-                  <span>周期结束日</span>
-                  <input id="forecastPeriodEnd" name="periodEndsOn" type="date" />
-                </label>
-                <label class="field-label">
-                  <span>周期天数</span>
-                  <input id="forecastCycleDays" name="cycleDays" type="number" min="1" max="90" step="1" inputmode="numeric" />
-                </label>
-                <div class="forecast-fallback-fields">
-                  <p>无本地日志时使用</p>
-                  <label class="field-label">
-                    <span>已用 Token</span>
-                    <input id="forecastFallbackUsed" name="fallbackUsedTokens" type="number" min="0" step="1" inputmode="decimal" placeholder="Cursor 可从账户页填入" />
-                  </label>
-                  <label class="field-label">
-                    <span>日均 Token</span>
-                    <input id="forecastFallbackDaily" name="fallbackDailyTokens" type="number" min="0" step="1" inputmode="decimal" placeholder="无记录时的估算速率" />
-                  </label>
-                </div>
-                <button class="primary-button forecast-save" id="forecastSaveBtn" type="submit">保存周期</button>
-              </form>
-            </article>
           </section>
 
           <section class="panel forecast-rate-panel">

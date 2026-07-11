@@ -283,5 +283,268 @@
     }));
   }
 
-  return { OTHER_MODEL, dayModelTokens, fitModelWeights, equivalentTokensForDay, applyModelWeights };
+  function buildSegmentIntervals(segments) {
+    const intervals = [];
+    (segments || []).forEach((segment, segmentIndex) => {
+      const points = [...(segment || [])]
+        .filter(
+          (point) =>
+            Number.isFinite(Number(point?.usedPercent)) &&
+            Number.isFinite(Number(point?.totalTokens))
+        )
+        .sort((a, b) => String(a.fetchedAt || "").localeCompare(String(b.fetchedAt || "")));
+      if (points.length < 2) return;
+      let anchor = points[0];
+      for (let index = 1; index < points.length; index += 1) {
+        const current = points[index];
+        const deltaPercent = Number(current.usedPercent) - Number(anchor.usedPercent);
+        if (deltaPercent < 0.05) continue;
+        const deltaTokens = Number(current.totalTokens) - Number(anchor.totalTokens);
+        if (deltaTokens <= 0) {
+          anchor = current;
+          continue;
+        }
+        const modelDeltas = Object.fromEntries(
+          subtractModelTotals(objectModelTokens(current.modelTotals), objectModelTokens(anchor.modelTotals))
+        );
+        intervals.push({
+          segmentIndex,
+          startedAt: anchor.fetchedAt || null,
+          endedAt: current.fetchedAt || null,
+          deltaPercent,
+          deltaTokens,
+          modelDeltas,
+        });
+        anchor = current;
+      }
+    });
+    return intervals;
+  }
+
+  function recencyWeight(endedAt, referenceTime, halfLifeDays) {
+    const ended = new Date(endedAt || referenceTime).getTime();
+    const reference = new Date(referenceTime).getTime();
+    if (!Number.isFinite(ended) || !Number.isFinite(reference)) return 1;
+    const ageDays = Math.max(0, (reference - ended) / 86400000);
+    return Math.pow(0.5, ageDays / halfLifeDays);
+  }
+
+  function median(values) {
+    if (!values.length) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+
+  function weightedOriginFit(intervals, options = {}) {
+    const valid = (intervals || []).filter(
+      (interval) => Number(interval?.deltaTokens) > 0 && Number(interval?.deltaPercent) > 0
+    );
+    if (valid.length < 2) return null;
+    const referenceTime =
+      options.referenceTime || valid.map((interval) => interval.endedAt).filter(Boolean).sort().at(-1) || new Date().toISOString();
+    const halfLifeDays = Math.max(7, Number(options.halfLifeDays) || 28);
+    const recencyWeights = valid.map((interval) => recencyWeight(interval.endedAt, referenceTime, halfLifeDays));
+    const slopeForWeights = (weights) => {
+      const numerator = valid.reduce(
+        (sum, interval, index) => sum + weights[index] * Number(interval.deltaTokens) * Number(interval.deltaPercent),
+        0
+      );
+      const denominator = valid.reduce(
+        (sum, interval, index) => sum + weights[index] * Number(interval.deltaTokens) ** 2,
+        0
+      );
+      return denominator > 0 ? numerator / denominator : null;
+    };
+    const initialSlope = slopeForWeights(recencyWeights);
+    if (!Number.isFinite(initialSlope) || initialSlope <= 0) return null;
+    const residuals = valid.map(
+      (interval) => Number(interval.deltaPercent) - initialSlope * Number(interval.deltaTokens)
+    );
+    const residualMedian = median(residuals);
+    const scale = Math.max(1e-6, 1.4826 * median(residuals.map((value) => Math.abs(value - residualMedian))));
+    const robustWeights = residuals.map((residual, index) => {
+      const distance = Math.abs(residual - residualMedian);
+      const huber = distance <= 1.5 * scale ? 1 : (1.5 * scale) / distance;
+      return recencyWeights[index] * huber;
+    });
+    const slope = slopeForWeights(robustWeights);
+    if (!Number.isFinite(slope) || slope <= 0) return null;
+    const weightTotal = robustWeights.reduce((sum, value) => sum + value, 0);
+    const meanY = valid.reduce(
+      (sum, interval, index) => sum + robustWeights[index] * Number(interval.deltaPercent),
+      0
+    ) / weightTotal;
+    const residualVariance = valid.reduce((sum, interval, index) => {
+      const residual = Number(interval.deltaPercent) - slope * Number(interval.deltaTokens);
+      return sum + robustWeights[index] * residual ** 2;
+    }, 0);
+    const totalVariance = valid.reduce((sum, interval, index) => {
+      const centered = Number(interval.deltaPercent) - meanY;
+      return sum + robustWeights[index] * centered ** 2;
+    }, 0);
+    return {
+      slope,
+      intercept: 0,
+      rSquared: totalVariance > 0 ? 1 - residualVariance / totalVariance : 1,
+      sampleCount: valid.length,
+      effectiveSampleWeight: weightTotal,
+      halfLifeDays,
+    };
+  }
+
+  function fitSegmentedQuota(intervals, options = {}) {
+    const valid = (intervals || []).filter(
+      (interval) => Number(interval?.deltaTokens) > 0 && Number(interval?.deltaPercent) > 0
+    );
+    const segmentCount = new Set(valid.map((interval) => interval.segmentIndex)).size;
+    const model = weightedOriginFit(valid, options);
+    return {
+      intervalCount: valid.length,
+      requiredIntervals: 2,
+      segmentCount,
+      model,
+    };
+  }
+
+  function applyModelWeightsToIntervals(intervals, modelFit) {
+    if (!modelFit?.active) return intervals || [];
+    const primarySet = new Set(modelFit.primaryModels || []);
+    const otherWeight = Number(modelFit.weightMap?.[OTHER_MODEL]) || 1;
+    return (intervals || []).map((interval) => {
+      const models = objectModelTokens(interval.modelDeltas);
+      const weightedTokens = [...models.entries()].reduce((sum, [name, value]) => {
+        const weight = primarySet.has(name) ? Number(modelFit.weightMap?.[name]) || 1 : otherWeight;
+        return sum + value * weight;
+      }, 0);
+      return {
+        ...interval,
+        rawDeltaTokens: Number(interval.deltaTokens) || 0,
+        deltaTokens: weightedTokens > 0 ? weightedTokens : Number(interval.deltaTokens) || 0,
+      };
+    });
+  }
+
+  function fitModelWeightsFromIntervals(intervals, rawSlope, options = {}) {
+    const minimumIntervals = Math.max(7, Number(options.minimumIntervals) || 7);
+    const maxFeatures = Math.max(2, Math.min(4, Number(options.maxFeatures) || 3));
+    const valid = (intervals || []).filter(
+      (interval) =>
+        Number(interval?.deltaTokens) > 0 &&
+        Number(interval?.deltaPercent) > 0 &&
+        interval?.modelDeltas &&
+        typeof interval.modelDeltas === "object"
+    );
+    const base = {
+      active: false,
+      intervalMode: true,
+      sampleCount: valid.length,
+      requiredSamples: minimumIntervals,
+      reason: "insufficient-snapshots",
+      weights: [],
+    };
+    if (valid.length < minimumIntervals) return base;
+    if (!Number.isFinite(rawSlope) || rawSlope <= 0) return { ...base, reason: "raw-fit-unavailable" };
+
+    const modelTotals = new Map();
+    valid.forEach((interval) => {
+      objectModelTokens(interval.modelDeltas).forEach((value, name) => {
+        modelTotals.set(name, (modelTotals.get(name) || 0) + value);
+      });
+    });
+    const grandTotal = [...modelTotals.values()].reduce((sum, value) => sum + value, 0);
+    const ranked = [...modelTotals.entries()]
+      .filter(([, value]) => grandTotal > 0 && value / grandTotal >= 0.02)
+      .sort((a, b) => b[1] - a[1]);
+    if (ranked.length < 2) return { ...base, reason: "single-model-mix" };
+    const primaryModels = ranked.slice(0, maxFeatures - 1).map(([name]) => name);
+    const featureNames = [...primaryModels, OTHER_MODEL];
+    const requiredSamples = Math.max(minimumIntervals, featureNames.length + 3);
+    if (valid.length < requiredSamples) return { ...base, requiredSamples, reason: "insufficient-snapshots" };
+
+    const featureRows = valid.map((interval) => ({
+      x: featureVectorFromModels(objectModelTokens(interval.modelDeltas), primaryModels).map(
+        (value) => value / TOKEN_SCALE
+      ),
+      y: Number(interval.deltaPercent),
+      endedAt: interval.endedAt,
+    }));
+    const shares = featureRows.map((row) => {
+      const total = row.x.reduce((sum, value) => sum + value, 0);
+      return total > 0 ? row.x.map((value) => value / total) : row.x;
+    });
+    const hasMixVariation = featureNames.some((_, index) => {
+      const values = shares.map((row) => row[index]);
+      return Math.max(...values) - Math.min(...values) >= 0.08;
+    });
+    if (!hasMixVariation) return { ...base, requiredSamples, reason: "stable-model-mix" };
+
+    const referenceTime = featureRows.map((row) => row.endedAt).filter(Boolean).sort().at(-1) || new Date().toISOString();
+    const halfLifeDays = Math.max(7, Number(options.halfLifeDays) || 28);
+    const rowWeights = featureRows.map((row) => recencyWeight(row.endedAt, referenceTime, halfLifeDays));
+    const scales = featureNames.map((_, index) => Math.max(...featureRows.map((row) => row.x[index]), 1));
+    const normalizedRows = featureRows.map((row) => ({
+      x: row.x.map((value, index) => value / scales[index]),
+      y: row.y,
+    }));
+    const priorPerMillion = rawSlope * TOKEN_SCALE;
+    const lambda = Math.max(0.01, Number(options.lambda) || 0.05);
+    const matrix = Array.from({ length: featureNames.length }, () => Array(featureNames.length).fill(0));
+    const vector = Array(featureNames.length).fill(0);
+    normalizedRows.forEach((row, rowIndex) => {
+      row.x.forEach((left, leftIndex) => {
+        vector[leftIndex] += rowWeights[rowIndex] * left * row.y;
+        row.x.forEach((right, rightIndex) => {
+          matrix[leftIndex][rightIndex] += rowWeights[rowIndex] * left * right;
+        });
+      });
+    });
+    featureNames.forEach((_, index) => {
+      matrix[index][index] += lambda;
+      vector[index] += lambda * priorPerMillion * scales[index];
+    });
+    const coefficients = solveLinearSystem(matrix, vector);
+    if (!coefficients) return { ...base, requiredSamples, reason: "ill-conditioned" };
+    const weights = featureNames.map((name, index) => {
+      const perMillion = coefficients[index] / scales[index];
+      return { name, weight: Math.min(4, Math.max(0.25, perMillion / priorPerMillion)) };
+    });
+    const weightMap = Object.fromEntries(weights.map((item) => [item.name, item.weight]));
+    const candidate = {
+      active: true,
+      intervalMode: true,
+      sampleCount: valid.length,
+      requiredSamples,
+      reason: null,
+      weights,
+      weightMap,
+      primaryModels,
+      halfLifeDays,
+    };
+    const weightedFit = weightedOriginFit(applyModelWeightsToIntervals(valid, candidate), {
+      referenceTime,
+      halfLifeDays,
+    });
+    const rawFit = weightedOriginFit(valid, { referenceTime, halfLifeDays });
+    if (!weightedFit || (rawFit && weightedFit.rSquared + 0.03 < rawFit.rSquared)) {
+      return { ...base, requiredSamples, reason: "weighted-fit-worse" };
+    }
+    return {
+      ...candidate,
+      rSquared: weightedFit.rSquared,
+      rawRSquared: rawFit?.rSquared ?? null,
+    };
+  }
+
+  return {
+    OTHER_MODEL,
+    dayModelTokens,
+    fitModelWeights,
+    equivalentTokensForDay,
+    applyModelWeights,
+    buildSegmentIntervals,
+    fitSegmentedQuota,
+    fitModelWeightsFromIntervals,
+    applyModelWeightsToIntervals,
+  };
 });

@@ -36,15 +36,6 @@ const els = {
   forecastAdvice: document.querySelector("#forecastAdvice"),
   forecastSourcePill: document.querySelector("#forecastSourcePill"),
   forecastRateList: document.querySelector("#forecastRateList"),
-  forecastForm: document.querySelector("#forecastForm"),
-  forecastSaveBtn: document.querySelector("#forecastSaveBtn"),
-  forecastSubscriptionPlan: document.querySelector("#forecastSubscriptionPlan"),
-  forecastAccountSync: document.querySelector("#forecastAccountSync"),
-  forecastBudgetTokens: document.querySelector("#forecastBudgetTokens"),
-  forecastPeriodEnd: document.querySelector("#forecastPeriodEnd"),
-  forecastCycleDays: document.querySelector("#forecastCycleDays"),
-  forecastFallbackUsed: document.querySelector("#forecastFallbackUsed"),
-  forecastFallbackDaily: document.querySelector("#forecastFallbackDaily"),
   viewTabs: [...document.querySelectorAll(".view-tab")],
 };
 
@@ -98,7 +89,6 @@ const VIEW_CONFIGS = {
 let currentView = "overview";
 let latestResetCredits = null;
 let forecastAgent = "codex";
-let forecastSettings = null;
 let forecastSnapshots = {};
 let forecastQuotas = {};
 
@@ -259,10 +249,7 @@ function defaultForecastPlan(agent = forecastAgent) {
 }
 
 function forecastPlan(agent = forecastAgent) {
-  return {
-    ...defaultForecastPlan(agent),
-    ...(forecastSettings?.agents?.[agent] || {}),
-  };
+  return defaultForecastPlan(agent);
 }
 
 function inputNumberOrNull(value) {
@@ -387,46 +374,66 @@ function leastSquares(points) {
   };
 }
 
-function quotaWindowPoints(quotaData) {
-  const observations = Array.isArray(quotaData?.observations) ? quotaData.observations : [];
-  const latestObservation = observations.at(-1);
-  if (latestObservation) {
-    const segment = [latestObservation];
-    for (let index = observations.length - 2; index >= 0; index -= 1) {
-      const previous = observations[index];
-      const current = segment[0];
-      const previousReset = previous.resetAt ? new Date(previous.resetAt).getTime() : null;
-      const currentReset = current.resetAt ? new Date(current.resetAt).getTime() : null;
-      const resetMatches = previousReset === null && currentReset === null
-        ? true
-        : previousReset !== null && currentReset !== null && Math.abs(previousReset - currentReset) <= 5 * 60 * 1000;
-      const quotaMonotonic = Number(current.usedPercent) + 0.5 >= Number(previous.usedPercent);
-      const usageMonotonic =
-        current.totalTokens === null ||
-        previous.totalTokens === null ||
-        Number(current.totalTokens) >= Number(previous.totalTokens);
-      if (previous.windowName !== latestObservation.windowName || !resetMatches || !quotaMonotonic || !usageMonotonic) break;
-      segment.unshift(previous);
+function mapQuotaObservation(observation) {
+  return {
+    day: String(observation.fetchedAt || "").slice(0, 10),
+    fetchedAt: observation.fetchedAt,
+    usedPercent: Number(observation.usedPercent),
+    totalTokens: Number.isFinite(Number(observation.totalTokens)) ? Number(observation.totalTokens) : null,
+    window: {
+      name: observation.windowName,
+      label: observation.windowLabel,
+      usedPercent: Number(observation.usedPercent),
+      resetsAt: observation.resetAt,
+      windowDurationMins: observation.windowDurationMins,
+    },
+    usageTotalTokens: Number.isFinite(Number(observation.totalTokens)) ? Number(observation.totalTokens) : null,
+    modelTotals: observation.models || {},
+    segment: observation.segment,
+    observation: true,
+  };
+}
+
+function quotaObservationsShareSegment(previous, current) {
+  if (!previous || !current || previous.windowName !== current.windowName) return false;
+  const previousReset = previous.resetAt ? new Date(previous.resetAt).getTime() : null;
+  const currentReset = current.resetAt ? new Date(current.resetAt).getTime() : null;
+  const resetMatches = previousReset === null && currentReset === null
+    ? true
+    : previousReset !== null && currentReset !== null && Math.abs(previousReset - currentReset) <= 5 * 60 * 1000;
+  const quotaMonotonic = Number(current.usedPercent) + 0.5 >= Number(previous.usedPercent);
+  const usageMonotonic =
+    current.totalTokens === null ||
+    previous.totalTokens === null ||
+    Number(current.totalTokens) >= Number(previous.totalTokens);
+  return resetMatches && quotaMonotonic && usageMonotonic;
+}
+
+function quotaObservationSegments(quotaData) {
+  const observations = [...(Array.isArray(quotaData?.observations) ? quotaData.observations : [])]
+    .filter((observation) => Number.isFinite(Number(observation.usedPercent)))
+    .sort((a, b) => String(a.fetchedAt || "").localeCompare(String(b.fetchedAt || "")));
+  const segments = [];
+  observations.forEach((observation) => {
+    const currentSegment = segments.at(-1);
+    const previous = currentSegment?.at(-1);
+    if (!currentSegment || !quotaObservationsShareSegment(previous, observation)) {
+      segments.push([observation]);
+    } else {
+      currentSegment.push(observation);
     }
-    return segment
-      .filter((observation) => Number.isFinite(Number(observation.usedPercent)))
-      .map((observation) => ({
-        day: String(observation.fetchedAt || "").slice(0, 10),
-        fetchedAt: observation.fetchedAt,
-        window: {
-          name: observation.windowName,
-          label: observation.windowLabel,
-          usedPercent: Number(observation.usedPercent),
-          resetsAt: observation.resetAt,
-          windowDurationMins: observation.windowDurationMins,
-        },
-        usageTotalTokens: Number.isFinite(Number(observation.totalTokens)) ? Number(observation.totalTokens) : null,
-        modelTotals: observation.models || {},
-        segment: observation.segment,
-        observation: true,
-      }))
-      .sort((a, b) => String(a.fetchedAt).localeCompare(String(b.fetchedAt)));
-  }
+  });
+  return segments.map((segment) => segment.map(mapQuotaObservation));
+}
+
+function quotaHistoryIntervals(quotaData) {
+  const segments = quotaObservationSegments(quotaData);
+  return globalThis.ForecastModel?.buildSegmentIntervals(segments) || [];
+}
+
+function quotaWindowPoints(quotaData) {
+  const observationSegments = quotaObservationSegments(quotaData);
+  if (observationSegments.length) return observationSegments.at(-1);
   if (!quotaData?.daily?.length) return [];
   const latest = quotaData.latest;
   const latestWindow = longestQuotaWindow(latest);
@@ -441,8 +448,47 @@ function quotaWindowPoints(quotaData) {
     .sort((a, b) => a.day.localeCompare(b.day));
 }
 
-function fitQuotaBurn(days, quotaData, account, dailyTokenRate) {
-  if (!account || account.type !== "percent" || !quotaData?.daily?.length || !dailyTokenRate) return null;
+function fitQuotaBurn(days, quotaData, account, dailyTokenRate, modelFit = null) {
+  if (
+    !account ||
+    account.type !== "percent" ||
+    (!quotaData?.daily?.length && !quotaData?.observations?.length) ||
+    !dailyTokenRate
+  ) return null;
+  const observationSegments = quotaObservationSegments(quotaData);
+  if (observationSegments.length) {
+    const rawIntervals = quotaHistoryIntervals(quotaData);
+    const intervals = modelFit?.active
+      ? globalThis.ForecastModel.applyModelWeightsToIntervals(rawIntervals, modelFit)
+      : rawIntervals;
+    const segmented = globalThis.ForecastModel?.fitSegmentedQuota(intervals) || {
+      intervalCount: 0,
+      requiredIntervals: 2,
+      segmentCount: 0,
+      model: null,
+    };
+    const currentSegmentPoints = observationSegments.at(-1)?.length || 0;
+    const base = {
+      sampleCount: currentSegmentPoints,
+      requiredSamples: 3,
+      currentSegmentPoints,
+      historyObservationCount: observationSegments.reduce((sum, segment) => sum + segment.length, 0),
+      intervalCount: segmented.intervalCount,
+      requiredIntervals: segmented.requiredIntervals,
+      totalSegmentCount: observationSegments.length,
+      contributingSegmentCount: segmented.segmentCount,
+      historicalMode: true,
+      observationMode: true,
+      model: segmented.model,
+    };
+    if (!segmented.model) return base;
+    const percentPerDay = segmented.model.slope * dailyTokenRate;
+    return {
+      ...base,
+      percentPerDay,
+      runwayDays: percentPerDay > 0 ? account.remaining / percentPerDay : null,
+    };
+  }
   const points = quotaWindowPoints(quotaData);
   if (points.length < 3) return { sampleCount: points.length, requiredSamples: 3, model: null };
 
@@ -495,20 +541,33 @@ function buildForecast(agent) {
   const account = accountQuotaSummary(quotaData?.latest);
   const rawRate = buildForecastRate(days, plan.fallbackDailyTokens);
   const rawQuotaFit = fitQuotaBurn(days, quotaData, account, rawRate.weightedRate);
-  const modelFit = globalThis.ForecastModel?.fitModelWeights(
-    days,
-    quotaWindowPoints(quotaData).map((point) => ({
-      day: point.day,
-      fetchedAt: point.fetchedAt,
-      usedPercent: Number(point.window.usedPercent),
-      totalTokens: point.usageTotalTokens,
-      modelTotals: point.modelTotals,
-    })),
-    rawQuotaFit?.model?.slope
-  ) || { active: false, sampleCount: rawQuotaFit?.sampleCount || 0, requiredSamples: 7, reason: "model-module-unavailable", weights: [] };
-  const effectiveDays = modelFit.active ? globalThis.ForecastModel.applyModelWeights(days, modelFit) : days;
-  const rate = modelFit.active ? buildForecastRate(effectiveDays, plan.fallbackDailyTokens) : rawRate;
-  const quotaFit = modelFit.active ? fitQuotaBurn(effectiveDays, quotaData, account, rate.weightedRate) : rawQuotaFit;
+  const hasQuotaObservations = quotaObservationSegments(quotaData).length > 0;
+  const historyIntervals = quotaHistoryIntervals(quotaData);
+  const modelFit = hasQuotaObservations
+    ? globalThis.ForecastModel?.fitModelWeightsFromIntervals(historyIntervals, rawQuotaFit?.model?.slope)
+    : globalThis.ForecastModel?.fitModelWeights(
+        days,
+        quotaWindowPoints(quotaData).map((point) => ({
+          day: point.day,
+          fetchedAt: point.fetchedAt,
+          usedPercent: Number(point.window.usedPercent),
+          totalTokens: point.usageTotalTokens,
+          modelTotals: point.modelTotals,
+        })),
+        rawQuotaFit?.model?.slope
+      );
+  const resolvedModelFit = modelFit || {
+    active: false,
+    sampleCount: historyIntervals.length || rawQuotaFit?.sampleCount || 0,
+    requiredSamples: 7,
+    reason: "model-module-unavailable",
+    weights: [],
+  };
+  const effectiveDays = resolvedModelFit.active ? globalThis.ForecastModel.applyModelWeights(days, resolvedModelFit) : days;
+  const rate = resolvedModelFit.active ? buildForecastRate(effectiveDays, plan.fallbackDailyTokens) : rawRate;
+  const quotaFit = resolvedModelFit.active
+    ? fitQuotaBurn(effectiveDays, quotaData, account, rate.weightedRate, resolvedModelFit)
+    : rawQuotaFit;
   const budgetTokens = inputNumberOrNull(plan.budgetTokens);
   const remainingTokens = budgetTokens === null || usedTokens === null ? null : Math.max(budgetTokens - usedTokens, 0);
   const daysUntilEnd = periodEnd ? Math.max(0, (dayDistance(today, periodEnd) ?? -1) + 1) : null;
@@ -529,7 +588,8 @@ function buildForecast(agent) {
     effectiveDays,
     rawRate,
     rate,
-    modelFit,
+    modelFit: resolvedModelFit,
+    historyIntervals,
     quotaData,
     account,
     quotaFit,
@@ -591,7 +651,8 @@ function modelFitStatus(modelFit) {
   if (modelFit?.active) return `模型权重已启用：${modelWeightSummary(modelFit) || "各模型接近基准权重"}`;
   const sampleCount = modelFit?.sampleCount || 0;
   const requiredSamples = modelFit?.requiredSamples || 7;
-  if (sampleCount < requiredSamples) return `模型等效 Token 等待 ${sampleCount} / ${requiredSamples} 个同周期观测点`;
+  const sampleUnit = modelFit?.intervalMode ? "跨周期有效区间" : "同周期观测点";
+  if (sampleCount < requiredSamples) return `模型等效 Token 等待 ${sampleCount} / ${requiredSamples} 个${sampleUnit}`;
   if (modelFit?.reason === "stable-model-mix") return "模型占比变化不足，暂时无法可靠区分模型权重";
   if (modelFit?.reason === "single-model-mix") return "当前周期只有一个主要模型，不需要模型换算";
   return "模型权重尚未通过稳定性检查，继续使用原始 Token";
@@ -655,14 +716,18 @@ function renderAccountRunway(forecast) {
 
   if (account.type === "percent" && fit?.model) {
     const tokenBasis = forecast.modelFit?.active ? "模型等效 Token" : "原始 Token";
-    const segmentText = fit.observationMode ? "当前重置分段" : "同一额度窗口";
-    els.forecastAdvice.innerHTML = `<strong>最小二乘拟合已启用。</strong><span>基于${segmentText}内 ${fit.sampleCount} 个观测点，将${tokenBasis}增量拟合为官方额度百分比。${escapeHtml(modelFitStatus(forecast.modelFit))}；预计 ${escapeHtml(formatRunway(forecast.exhaustionDays))} 后耗尽。</span>`;
+    const historyText = fit.historicalMode
+      ? `跨 ${fit.contributingSegmentCount} 个重置周期的 ${fit.intervalCount} 个有效区间（当前周期 ${fit.currentSegmentPoints} 个观测点）`
+      : `同一额度窗口内 ${fit.sampleCount} 个观测点`;
+    els.forecastAdvice.innerHTML = `<strong>跨周期拟合已启用。</strong><span>基于${historyText}，将${tokenBasis} 增量拟合为官方额度百分比；旧周期按 28 天半衰期降低权重。额度重置只开启新分段，不会清空历史样本。${escapeHtml(modelFitStatus(forecast.modelFit))}；预计 ${escapeHtml(formatRunway(forecast.exhaustionDays))} 后耗尽。</span>`;
   } else if (account.type === "percent") {
-    const count = fit?.sampleCount || 0;
+    const intervalCount = fit?.intervalCount || 0;
+    const requiredIntervals = fit?.requiredIntervals || 2;
+    const currentPoints = fit?.currentSegmentPoints || fit?.sampleCount || 0;
     const message = forecast.agent === "cursor"
       ? "主进度使用 Cursor 设置页的 Included in Pro 总百分比；Auto + Composer 与 API 单独保留。已收集"
       : "已收集";
-    els.forecastAdvice.innerHTML = `<strong>官方额度已同步。</strong><span>${message} ${count} / 3 个当前重置分段观测点；达到 3 个后先启用原始 Token 拟合。额度重置或已用比例回落会自动开启新分段。${escapeHtml(modelFitStatus(forecast.modelFit))}。</span>`;
+    els.forecastAdvice.innerHTML = `<strong>官方额度已同步。</strong><span>${message} ${intervalCount} / ${requiredIntervals} 个跨周期有效区间，当前周期 ${currentPoints} 个观测点；达到 ${requiredIntervals} 个有效区间后启用原始 Token 拟合。额度重置只开启新分段，历史样本会继续参与并随时间衰减。${escapeHtml(modelFitStatus(forecast.modelFit))}。</span>`;
   } else {
     els.forecastAdvice.innerHTML = `<strong>Cursor 账期已同步。</strong><span>账户计划单位与 token 不是已确认的一对一口径；保留原始已用、剩余和账期，待 Cursor 每日事件数据积累后再启用拟合。</span>`;
   }
@@ -675,74 +740,11 @@ function renderForecastRunway(forecast) {
     renderAccountRunway(forecast);
     return;
   }
-  els.forecastRunwayTitle.textContent = `${forecast.meta.label} 本周期节奏`;
-  els.forecastPeriodPill.textContent = forecast.periodStart && forecast.periodEnd
-    ? `${formatDateKey(forecast.periodStart)} - ${formatDateKey(forecast.periodEnd)}`
-    : "等待周期配置";
-
-  if (forecast.budgetTokens === null || !forecast.periodEnd) {
-    els.forecastRunway.appendChild(emptyState("设置计划额度和周期结束日后生成耗尽预测"));
-    const advice = document.createElement("div");
-    advice.innerHTML = "<strong>预测需要周期基准。</strong><span>本地日志会自动计算已用量；计划额度与结束日需要你按自己的订阅周期填入。</span>";
-    els.forecastAdvice.appendChild(advice);
-    return;
-  }
-
-  const used = forecast.usedTokens || 0;
-  const remaining = forecast.remainingTokens || 0;
-  const projected = forecast.projectedTokens || used;
-  const target = forecast.targetDailyTokens;
-  const usedRatio = forecast.budgetTokens > 0 ? clamp(used / forecast.budgetTokens, 0, 1) : 0;
-  const projectedRatio = forecast.budgetTokens > 0 ? clamp(projected / forecast.budgetTokens, 0, 1) : 0;
-  const isOverBudget = used >= forecast.budgetTokens || projected > forecast.budgetTokens;
-
-  const summary = document.createElement("div");
-  summary.className = "runway-summary";
-  [
-    ["本周期已用", formatCompact(used)],
-    ["可用余额", formatCompact(remaining)],
-    ["建议日均", target === null ? "--" : formatCompact(target)],
-  ].forEach(([label, value]) => appendRunwayStat(summary, label, value));
-  els.forecastRunway.appendChild(summary);
-
-  const trackWrap = document.createElement("div");
-  trackWrap.className = "runway-track-wrap";
-  const marker = document.createElement("div");
-  marker.className = "runway-marker is-end";
-  marker.style.left = `${projectedRatio * 100}%`;
-  marker.innerHTML = `<span class="runway-marker-label">期末预测 ${escapeHtml(formatCompact(projected))}</span>`;
-  const track = document.createElement("div");
-  track.className = "runway-track";
-  const usedSegment = document.createElement("div");
-  usedSegment.className = `runway-used${isOverBudget ? " runway-over" : ""}`;
-  usedSegment.style.width = `${usedRatio * 100}%`;
-  const remainingSegment = document.createElement("div");
-  remainingSegment.className = "runway-remaining";
-  remainingSegment.style.width = `${Math.max(0, 100 - usedRatio * 100)}%`;
-  track.append(usedSegment, remainingSegment);
-  trackWrap.append(marker, track);
-  els.forecastRunway.appendChild(trackWrap);
-
-  const dates = document.createElement("div");
-  dates.className = "runway-dates";
-  dates.innerHTML = `<span>起始 ${escapeHtml(formatDateKey(forecast.periodStart))}</span><span>结束 ${escapeHtml(formatDateKey(forecast.periodEnd))}</span>`;
-  els.forecastRunway.appendChild(dates);
-
+  els.forecastRunwayTitle.textContent = `${forecast.meta.label} 账户额度`;
+  els.forecastPeriodPill.textContent = "等待自动同步";
+  els.forecastRunway.appendChild(emptyState("刷新后将自动读取账户额度与重置时间"));
   const advice = document.createElement("div");
-  if (forecast.usedTokens === null) {
-    advice.innerHTML = "<strong>没有可用已用量。</strong><span>此周期没有本地快照；可在右侧填写无日志时的已用 Token。</span>";
-  } else if (remaining <= 0) {
-    advice.innerHTML = "<strong>计划额度已用完。</strong><span>下一周期前建议暂停高 token 工作，或调整计划额度以反映实际可用量。</span>";
-  } else if (!forecast.rate.weightedRate) {
-    advice.innerHTML = "<strong>尚无法估算耗尽时间。</strong><span>导出本地日志后会计算速率；也可以填写无日志时的日均 Token。</span>";
-  } else if (forecast.daysUntilEnd !== null && forecast.exhaustionDays < forecast.daysUntilEnd) {
-    advice.innerHTML = `<strong>按当前节奏将提前耗尽。</strong><span>预计 ${escapeHtml(formatRunway(forecast.exhaustionDays))} 后用完，建议把日均控制在 ${escapeHtml(formatCompact(target || 0))} Token 以内。</span>`;
-  } else if (forecast.daysUntilEnd !== null) {
-    const leftover = Math.max(forecast.budgetTokens - projected, 0);
-    advice.innerHTML = `<strong>当前节奏可覆盖本周期。</strong><span>按预测到期末将剩余 ${escapeHtml(formatCompact(leftover))} Token；若希望接近用完，日均目标为 ${escapeHtml(formatCompact(target || 0))} Token。</span>`;
-  } else {
-    advice.innerHTML = `<strong>预计剩余可用 ${escapeHtml(formatRunway(forecast.exhaustionDays))}。</strong><span>请设置周期结束日，以获得按期末对齐的日均目标。</span>`;
-  }
+  advice.innerHTML = "<strong>尚未取得账户额度快照。</strong><span>点击页面右上角刷新会同时同步 Codex、Claude Code 与 Cursor；本地 Token 速率仍会继续记录。</span>";
   els.forecastAdvice.appendChild(advice);
 }
 
@@ -791,21 +793,6 @@ function renderForecastRates(forecast) {
   });
 }
 
-function syncForecastForm(agent = forecastAgent) {
-  const plan = forecastPlan(agent);
-  els.forecastSubscriptionPlan.value = [...els.forecastSubscriptionPlan.options].some(
-    (option) => option.value === plan.subscriptionPlan
-  )
-    ? plan.subscriptionPlan
-    : "Custom";
-  els.forecastBudgetTokens.value = plan.budgetTokens ?? "";
-  els.forecastAccountSync.checked = plan.accountSyncEnabled !== false;
-  els.forecastPeriodEnd.value = plan.periodEndsOn ?? "";
-  els.forecastCycleDays.value = plan.cycleDays ?? 7;
-  els.forecastFallbackUsed.value = plan.fallbackUsedTokens ?? "";
-  els.forecastFallbackDaily.value = plan.fallbackDailyTokens ?? "";
-}
-
 function renderForecast(agent = forecastAgent) {
   const forecast = buildForecast(agent);
   els.forecastMetricGrid.replaceChildren();
@@ -824,39 +811,29 @@ function renderForecast(agent = forecastAgent) {
       forecast.modelFit?.active ? "账户额度反向学习模型权重" : forecast.rate.isFallback ? "手动日均" : "今日、3 日、7 日加权"
     );
     renderForecastMetric(
-      fit?.model ? "拟合耗尽" : "拟合样本",
-      fit?.model ? formatRunway(forecast.exhaustionDays) : `${fit?.sampleCount || 0} / 3`,
+      fit?.model ? "拟合耗尽" : "历史有效区间",
       fit?.model
-        ? `R² ${fit.model.rSquared.toFixed(2)} · ${forecast.modelFit?.active ? "模型等效 Token" : "原始 Token"}`
-        : "全局刷新或定时同步会追加观测点"
+        ? formatRunway(forecast.exhaustionDays)
+        : `${fit?.intervalCount || 0} / ${fit?.requiredIntervals || 2}`,
+      fit?.model
+        ? `R² ${fit.model.rSquared.toFixed(2)} · ${fit.intervalCount || fit.sampleCount} 个区间 / ${fit.contributingSegmentCount || 1} 个周期 · ${forecast.modelFit?.active ? "模型等效 Token" : "原始 Token"}`
+        : `${fit?.totalSegmentCount || 0} 个周期 · 当前 ${fit?.currentSegmentPoints || fit?.sampleCount || 0} 个观测点`
     );
     els.forecastSourcePill.textContent = forecast.quotaData?.latest
-      ? `账户快照 · ${forecast.quotaData.latest.file?.name || "最新"}${forecast.modelFit?.active ? " · 模型校正" : ""}`
+      ? `账户快照 · ${forecast.quotaData.latest.file?.name || "最新"}${fit?.historicalMode ? ` · 跨周期${fit.model ? "拟合" : "采样"}` : ""}${forecast.modelFit?.active ? " · 模型校正" : ""}`
       : "未发现账户快照";
     renderForecastRunway(forecast);
     renderForecastRates(forecast);
     return;
   }
 
-  const budgetLabel = forecast.budgetTokens === null ? "--" : formatCompact(forecast.budgetTokens);
-  const usageSub = forecast.budgetTokens === null || forecast.usedTokens === null
-    ? "等待周期额度与用量"
-    : `${formatPercent(forecast.usedTokens / Math.max(forecast.budgetTokens, 1))} 已使用`;
-  renderForecastMetric(
-    "计划额度",
-    budgetLabel,
-    forecast.periodEnd
-      ? `${forecast.plan.subscriptionPlan || "未设置方案"} · ${forecast.cycleDays} 天，结束 ${formatDateKey(forecast.periodEnd)}`
-      : `${forecast.plan.subscriptionPlan || "未设置方案"} · 请填写周期结束日`
-  );
-  renderForecastMetric("本周期已用", forecast.usedTokens === null ? "--" : formatCompact(forecast.usedTokens), forecast.hasLocalUsage ? "来自本地每日快照" : "使用无日志兜底值");
-  renderForecastMetric("综合日均", forecast.rate.weightedRate ? `${formatCompact(forecast.rate.weightedRate)} / 日` : "--", forecast.rate.isFallback ? "手动日均" : "今日、3 日、7 日加权");
-  renderForecastMetric("预计耗尽", forecast.exhaustionDays === null ? "--" : formatRunway(forecast.exhaustionDays), forecast.predictedEnd ? `预计 ${formatDateKey(forecast.predictedEnd)}` : usageSub);
+  renderForecastMetric("账户额度", "--", "等待自动同步");
+  renderForecastMetric("重置时间", "--", "由账户接口自动读取");
+  renderForecastMetric("综合日均", forecast.rate.weightedRate ? `${formatCompact(forecast.rate.weightedRate)} / 日` : "--", "今日、3 日、7 日加权");
+  renderForecastMetric("预计耗尽", "--", "取得账户额度后自动计算");
   els.forecastSourcePill.textContent = forecast.snapshot?.latestFile
     ? `本地快照 · ${forecast.snapshot.latestFile.name}`
-    : forecast.rate.isFallback
-      ? "手动兜底数据"
-      : "未发现本地快照";
+    : "未发现本地快照";
   renderForecastRunway(forecast);
   renderForecastRates(forecast);
 }
@@ -868,7 +845,6 @@ function setForecastAgent(agent) {
   });
   const snapshot = forecastSnapshots[forecastAgent];
   els.sourcePath.textContent = snapshot?.latestFile ? snapshot.latestFile.path : snapshot?.logDir || `usage-logs/${forecastAgent}/daily`;
-  syncForecastForm(forecastAgent);
   renderForecast(forecastAgent);
 }
 
@@ -1470,12 +1446,6 @@ async function fetchQuota(source) {
   return response.json();
 }
 
-async function fetchForecastSettings() {
-  const response = await fetch("/api/forecast-settings", { cache: "no-store" });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
-}
-
 async function loadSourcesView() {
   setStatus("正在读取数据源状态...");
   const response = await fetch("/api/sources", { cache: "no-store" });
@@ -1494,9 +1464,8 @@ async function loadSourcesView() {
 }
 
 async function loadForecastView() {
-  setStatus("正在读取预测数据与周期配置...");
-  const [settingsPayload, codex, claude, cursor, codexQuota, claudeQuota, cursorQuota] = await Promise.all([
-    fetchForecastSettings(),
+  setStatus("正在读取用量与账户额度...");
+  const [codex, claude, cursor, codexQuota, claudeQuota, cursorQuota] = await Promise.all([
     fetchUsage("codex"),
     fetchUsage("claude"),
     fetchUsage("cursor"),
@@ -1504,7 +1473,6 @@ async function loadForecastView() {
     fetchQuota("claude"),
     fetchQuota("cursor"),
   ]);
-  forecastSettings = settingsPayload.settings || { version: 1, agents: {} };
   forecastSnapshots = { codex, claude, cursor };
   forecastQuotas = { codex: codexQuota, claude: claudeQuota, cursor: cursorQuota };
   setForecastAgent(forecastAgent);
@@ -1597,47 +1565,6 @@ async function exportAndRefresh(scope = "current") {
   }
 }
 
-async function saveForecastPlan(event) {
-  event.preventDefault();
-  const currentSettings = forecastSettings || { version: 1, agents: {} };
-  const plan = {
-    subscriptionPlan: els.forecastSubscriptionPlan.value,
-    accountSyncEnabled: els.forecastAccountSync.checked,
-    budgetTokens: inputNumberOrNull(els.forecastBudgetTokens.value),
-    periodEndsOn: /^\d{4}-\d{2}-\d{2}$/.test(els.forecastPeriodEnd.value) ? els.forecastPeriodEnd.value : null,
-    cycleDays: clamp(Math.round(inputNumberOrNull(els.forecastCycleDays.value) || 7), 1, 90),
-    fallbackUsedTokens: inputNumberOrNull(els.forecastFallbackUsed.value),
-    fallbackDailyTokens: inputNumberOrNull(els.forecastFallbackDaily.value),
-  };
-  const payload = {
-    version: 1,
-    agents: {
-      ...(currentSettings.agents || {}),
-      [forecastAgent]: plan,
-    },
-  };
-
-  els.forecastSaveBtn.disabled = true;
-  setStatus(`正在保存 ${FORECAST_AGENT_META[forecastAgent].label} 周期配置...`);
-  try {
-    const response = await fetch("/api/forecast-settings", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    forecastSettings = data.settings;
-    syncForecastForm(forecastAgent);
-    renderForecast(forecastAgent);
-    setStatus(`已保存 ${FORECAST_AGENT_META[forecastAgent].label} 周期配置`, "ok");
-  } catch (error) {
-    setStatus(`周期配置保存失败：${error.message}`, "error");
-  } finally {
-    els.forecastSaveBtn.disabled = false;
-  }
-}
-
 els.viewTabs.forEach((tab) => {
   tab.addEventListener("click", () => {
     const view = tab.dataset.view || "overview";
@@ -1651,8 +1578,6 @@ els.forecastAgentTabs.forEach((tab) => {
     setForecastAgent(tab.dataset.forecastAgent || "codex");
   });
 });
-
-els.forecastForm.addEventListener("submit", saveForecastPlan);
 
 els.refreshBtn.addEventListener("click", () => exportAndRefresh("everything"));
 els.exportBtn.addEventListener("click", () => exportAndRefresh("everything"));
