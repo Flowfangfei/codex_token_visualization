@@ -396,6 +396,9 @@ function mapQuotaObservation(observation) {
 
 function quotaObservationsShareSegment(previous, current) {
   if (!previous || !current || previous.windowName !== current.windowName) return false;
+  const previousSegment = previous.segment === null || previous.segment === undefined ? null : String(previous.segment);
+  const currentSegment = current.segment === null || current.segment === undefined ? null : String(current.segment);
+  if (previousSegment !== null && currentSegment !== null && previousSegment !== currentSegment) return false;
   const previousReset = previous.resetAt ? new Date(previous.resetAt).getTime() : null;
   const currentReset = current.resetAt ? new Date(current.resetAt).getTime() : null;
   const resetMatches = previousReset === null && currentReset === null

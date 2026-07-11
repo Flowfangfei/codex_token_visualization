@@ -101,6 +101,52 @@ test("quota observation segmentation detects resets inside the same day", async 
   );
 });
 
+test("multiple resets in one day create isolated fit intervals", async () => {
+  const { detectObservationSegment } = await import("../scripts/sync-account-quotas.mjs");
+  const samples = [
+    { fetchedAt: "2026-07-11T01:00:00Z", resetAt: "2026-07-18T00:00:00Z", usedPercent: 10, totalTokens: 100_000_000 },
+    { fetchedAt: "2026-07-11T03:00:00Z", resetAt: "2026-07-18T00:00:00Z", usedPercent: 35, totalTokens: 125_000_000 },
+    { fetchedAt: "2026-07-11T05:00:00Z", resetAt: "2026-07-18T00:00:00Z", usedPercent: 2, totalTokens: 130_000_000 },
+    { fetchedAt: "2026-07-11T07:00:00Z", resetAt: "2026-07-18T00:00:00Z", usedPercent: 20, totalTokens: 148_000_000 },
+    { fetchedAt: "2026-07-11T09:00:00Z", resetAt: "2026-07-18T00:00:00Z", usedPercent: 1, totalTokens: 150_000_000 },
+    { fetchedAt: "2026-07-11T11:00:00Z", resetAt: "2026-07-18T00:00:00Z", usedPercent: 12, totalTokens: 161_000_000 },
+  ];
+  let segment = 0;
+  const observations = samples.map((sample, index) => {
+    const prior = index > 0 ? samples[index - 1] : null;
+    const decision = detectObservationSegment(prior, sample);
+    if (decision.newSegment) segment += 1;
+    return { ...sample, segment, modelTotals: { alpha: sample.totalTokens } };
+  });
+  const segments = [...observations.reduce((groups, observation) => {
+    const group = groups.get(observation.segment) || [];
+    group.push(observation);
+    groups.set(observation.segment, group);
+    return groups;
+  }, new Map()).values()];
+  const intervals = ForecastModel.buildSegmentIntervals(segments);
+
+  assert.deepEqual(observations.map((observation) => observation.segment), [1, 1, 2, 2, 3, 3]);
+  assert.deepEqual(intervals.map((interval) => interval.deltaTokens), [25_000_000, 18_000_000, 11_000_000]);
+  assert.deepEqual(intervals.map((interval) => interval.deltaPercent), [25, 18, 11]);
+  assert.equal(ForecastModel.fitSegmentedQuota(intervals).segmentCount, 3);
+});
+
+test("observation compaction preserves multiple reset boundaries", async () => {
+  const { compactObservations } = await import("../scripts/sync-account-quotas.mjs");
+  const observations = Array.from({ length: 120 }, (_, index) => ({
+    id: index,
+    segment: index < 40 ? 1 : index < 80 ? 2 : 3,
+    resetDetected: index === 40 || index === 80,
+  }));
+  const compacted = compactObservations(observations, 96);
+  const ids = new Set(compacted.map((observation) => observation.id));
+
+  assert.equal(compacted.length, 96);
+  assert.deepEqual(compacted.map((observation) => observation.id), [...compacted].map((observation) => observation.id).sort((a, b) => a - b));
+  [0, 39, 40, 79, 80, 119].forEach((id) => assert.equal(ids.has(id), true));
+});
+
 test("segmented quota fit keeps historical intervals after a new cycle starts", () => {
   const segments = [
     [

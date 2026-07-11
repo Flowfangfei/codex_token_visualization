@@ -568,6 +568,40 @@ export function detectObservationSegment(prior, current) {
   return { newSegment: false, resetDetected: false, reason: null };
 }
 
+export function compactObservations(observations, maxEntries = 96) {
+  const entries = Array.isArray(observations) ? observations : [];
+  const limit = Math.max(1, Math.floor(Number(maxEntries) || 96));
+  if (entries.length <= limit) return entries;
+
+  const protectedIndexes = new Set([0, entries.length - 1]);
+  for (let index = 1; index < entries.length; index += 1) {
+    const previous = entries[index - 1];
+    const current = entries[index];
+    const previousSegment = previous?.segment === null || previous?.segment === undefined
+      ? null
+      : String(previous.segment);
+    const currentSegment = current?.segment === null || current?.segment === undefined
+      ? null
+      : String(current.segment);
+    const segmentChanged = previousSegment !== null && currentSegment !== null && previousSegment !== currentSegment;
+    if (current?.resetDetected || segmentChanged) {
+      protectedIndexes.add(index - 1);
+      protectedIndexes.add(index);
+    }
+  }
+
+  const selected = [...protectedIndexes].sort((a, b) => a - b);
+  if (selected.length > limit) {
+    return selected.slice(-limit).map((index) => entries[index]);
+  }
+  for (let index = entries.length - 1; index >= 0 && selected.length < limit; index -= 1) {
+    if (!protectedIndexes.has(index)) selected.push(index);
+  }
+  return selected
+    .sort((a, b) => a - b)
+    .map((index) => entries[index]);
+}
+
 function writeQuotaObservation(snapshot, usageAggregate) {
   const source = snapshot.source;
   cleanupObservations(source);
@@ -619,7 +653,7 @@ function writeQuotaObservation(snapshot, usageAggregate) {
     }
   }
   observations.push(observation);
-  observations = observations.slice(-96);
+  observations = compactObservations(observations, 96);
   writeFileSync(filePath, `${JSON.stringify({ source, date: localDateKey(), observations }, null, 2)}\n`, "utf8");
   return { recorded: true, file: filePath, segment, resetDetected: observation.resetDetected };
 }
