@@ -33,6 +33,7 @@ const els = {
   resetCreditList: document.querySelector("#resetCreditList"),
   forecastView: document.querySelector("#forecastView"),
   forecastAgentTabs: document.querySelector("#forecastAgentTabs"),
+  quotaWindowTabs: document.querySelector("#quotaWindowTabs"),
   providerViewTabs: document.querySelector("#providerViewTabs"),
   forecastMetricGrid: document.querySelector("#forecastMetricGrid"),
   forecastRunwayTitle: document.querySelector("#forecastRunwayTitle"),
@@ -74,6 +75,7 @@ let providerMeta = {};
 let forecastAgent = null;
 let forecastSnapshots = {};
 let forecastQuotas = {};
+const forecastWindowSelections = {};
 let visibleUpdateId = null;
 
 function viewTabElements() {
@@ -387,15 +389,24 @@ function quotaSnapshotDay(snapshot) {
 }
 
 function longestQuotaWindow(snapshot) {
-  const windows = Array.isArray(snapshot?.windows) ? snapshot.windows : [];
-  return windows
+  return selectableQuotaWindows(snapshot)
     .filter((window) => Number.isFinite(Number(window?.usedPercent)))
     .slice()
     .sort((a, b) => (Number(b.windowDurationMins) || 0) - (Number(a.windowDurationMins) || 0))[0] || null;
 }
 
-function accountQuotaSummary(snapshot) {
-  const window = longestQuotaWindow(snapshot);
+function selectableQuotaWindows(snapshot) {
+  return (Array.isArray(snapshot?.windows) ? snapshot.windows : [])
+    .filter((window) => window?.selectable !== false && Number.isFinite(Number(window?.usedPercent)));
+}
+
+function selectedQuotaWindow(snapshot, requestedName) {
+  const windows = selectableQuotaWindows(snapshot);
+  return windows.find((window) => window.name === requestedName) || longestQuotaWindow(snapshot);
+}
+
+function accountQuotaSummary(snapshot, windowName = null) {
+  const window = selectedQuotaWindow(snapshot, windowName);
   if (window) {
     const used = clamp(Number(window.usedPercent), 0, 100);
     return {
@@ -405,6 +416,7 @@ function accountQuotaSummary(snapshot) {
       remaining: Math.max(0, 100 - used),
       resetAt: window.resetsAt || null,
       windowDurationMins: Number(window.windowDurationMins) || null,
+      windowKind: window.windowKind || null,
     };
   }
 
@@ -481,9 +493,12 @@ function quotaObservationsShareSegment(previous, current) {
   return resetMatches && quotaMonotonic && usageMonotonic;
 }
 
-function quotaObservationSegments(quotaData) {
+function quotaObservationSegments(quotaData, activeWindowName = null) {
+  const resolvedWindowName = activeWindowName || longestQuotaWindow(quotaData?.latest)?.name || null;
   const observations = [...(Array.isArray(quotaData?.observations) ? quotaData.observations : [])]
-    .filter((observation) => Number.isFinite(Number(observation.usedPercent)))
+    .filter((observation) =>
+      Number.isFinite(Number(observation.usedPercent)) &&
+      (!resolvedWindowName || observation.windowName === resolvedWindowName))
     .sort((a, b) => String(a.fetchedAt || "").localeCompare(String(b.fetchedAt || "")));
   const segments = [];
   observations.forEach((observation) => {
@@ -498,19 +513,19 @@ function quotaObservationSegments(quotaData) {
   return segments.map((segment) => segment.map(mapQuotaObservation));
 }
 
-function quotaHistoryIntervals(quotaData) {
-  const segments = quotaObservationSegments(quotaData);
+function quotaHistoryIntervals(quotaData, windowName = null) {
+  const segments = quotaObservationSegments(quotaData, windowName);
   return globalThis.ForecastModel?.buildSegmentIntervals(segments) || [];
 }
 
-function quotaWindowPoints(quotaData) {
-  const observationSegments = quotaObservationSegments(quotaData);
+function quotaWindowPoints(quotaData, activeWindowName = null) {
+  const observationSegments = quotaObservationSegments(quotaData, activeWindowName);
   if (observationSegments.length) return observationSegments.at(-1);
   if (!quotaData?.daily?.length) return [];
   const latest = quotaData.latest;
-  const latestWindow = longestQuotaWindow(latest);
+  const latestWindow = selectedQuotaWindow(latest, activeWindowName);
   if (!latestWindow?.resetsAt) return [];
-  const windowName = latestWindow.name;
+  const windowName = activeWindowName || latestWindow.name;
   const resetAt = latestWindow.resetsAt;
   return quotaData.daily
     .map((snapshot) => ({ snapshot, day: quotaSnapshotDay(snapshot) }))
@@ -520,16 +535,16 @@ function quotaWindowPoints(quotaData) {
     .sort((a, b) => a.day.localeCompare(b.day));
 }
 
-function fitQuotaBurn(days, quotaData, account, dailyTokenRate, modelFit = null) {
+function fitQuotaBurn(days, quotaData, account, dailyTokenRate, modelFit = null, windowName = null) {
   if (
     !account ||
     account.type !== "percent" ||
     (!quotaData?.daily?.length && !quotaData?.observations?.length) ||
     !dailyTokenRate
   ) return null;
-  const observationSegments = quotaObservationSegments(quotaData);
+  const observationSegments = quotaObservationSegments(quotaData, windowName);
   if (observationSegments.length) {
-    const rawIntervals = quotaHistoryIntervals(quotaData);
+    const rawIntervals = quotaHistoryIntervals(quotaData, windowName);
     const intervals = modelFit?.active
       ? globalThis.ForecastModel.applyModelWeightsToIntervals(rawIntervals, modelFit)
       : rawIntervals;
@@ -561,7 +576,7 @@ function fitQuotaBurn(days, quotaData, account, dailyTokenRate, modelFit = null)
       runwayDays: percentPerDay > 0 ? account.remaining / percentPerDay : null,
     };
   }
-  const points = quotaWindowPoints(quotaData);
+  const points = quotaWindowPoints(quotaData, windowName);
   if (points.length < 3) return { sampleCount: points.length, requiredSamples: 3, model: null };
 
   const firstDay = points[0].day;
@@ -610,16 +625,19 @@ function buildForecast(agent) {
   const fallbackUsed = inputNumberOrNull(plan.fallbackUsedTokens);
   const usedTokens = hasLocalUsage ? localUsed : fallbackUsed;
   const quotaData = forecastQuotas[agent] || null;
-  const account = accountQuotaSummary(quotaData?.latest);
+  const quotaWindows = selectableQuotaWindows(quotaData?.latest);
+  const selectedWindow = selectedQuotaWindow(quotaData?.latest, forecastWindowSelections[agent]);
+  const selectedWindowName = selectedWindow?.name || null;
+  const account = accountQuotaSummary(quotaData?.latest, selectedWindowName);
   const rawRate = buildForecastRate(days, plan.fallbackDailyTokens);
-  const rawQuotaFit = fitQuotaBurn(days, quotaData, account, rawRate.weightedRate);
-  const hasQuotaObservations = quotaObservationSegments(quotaData).length > 0;
-  const historyIntervals = quotaHistoryIntervals(quotaData);
+  const rawQuotaFit = fitQuotaBurn(days, quotaData, account, rawRate.weightedRate, null, selectedWindowName);
+  const hasQuotaObservations = quotaObservationSegments(quotaData, selectedWindowName).length > 0;
+  const historyIntervals = quotaHistoryIntervals(quotaData, selectedWindowName);
   const modelFit = hasQuotaObservations
     ? globalThis.ForecastModel?.fitModelWeightsFromIntervals(historyIntervals, rawQuotaFit?.model?.slope)
     : globalThis.ForecastModel?.fitModelWeights(
         days,
-        quotaWindowPoints(quotaData).map((point) => ({
+        quotaWindowPoints(quotaData, selectedWindowName).map((point) => ({
           day: point.day,
           fetchedAt: point.fetchedAt,
           usedPercent: Number(point.window.usedPercent),
@@ -638,7 +656,7 @@ function buildForecast(agent) {
   const effectiveDays = resolvedModelFit.active ? globalThis.ForecastModel.applyModelWeights(days, resolvedModelFit) : days;
   const rate = resolvedModelFit.active ? buildForecastRate(effectiveDays, plan.fallbackDailyTokens) : rawRate;
   const quotaFit = resolvedModelFit.active
-    ? fitQuotaBurn(effectiveDays, quotaData, account, rate.weightedRate, resolvedModelFit)
+    ? fitQuotaBurn(effectiveDays, quotaData, account, rate.weightedRate, resolvedModelFit, selectedWindowName)
     : rawQuotaFit;
   const budgetTokens = inputNumberOrNull(plan.budgetTokens);
   const remainingTokens = budgetTokens === null || usedTokens === null ? null : Math.max(budgetTokens - usedTokens, 0);
@@ -663,6 +681,8 @@ function buildForecast(agent) {
     modelFit: resolvedModelFit,
     historyIntervals,
     quotaData,
+    quotaWindows,
+    selectedWindowName,
     account,
     quotaFit,
     today,
@@ -687,6 +707,32 @@ function renderForecastMetric(label, value, sub) {
   node.querySelector(".metric-value").textContent = value;
   node.querySelector(".metric-sub").textContent = sub;
   els.forecastMetricGrid.appendChild(node);
+}
+
+function renderQuotaWindowTabs(forecast) {
+  els.quotaWindowTabs.replaceChildren();
+  const windows = Array.isArray(forecast.quotaWindows) ? forecast.quotaWindows : [];
+  els.quotaWindowTabs.classList.toggle("is-hidden", windows.length <= 1);
+  if (windows.length <= 1) return;
+
+  for (const window of windows) {
+    const usedPercent = clamp(Number(window.usedPercent), 0, 100);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quota-window-tab";
+    button.dataset.quotaWindow = window.name;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(window.name === forecast.selectedWindowName));
+    button.classList.toggle("is-active", window.name === forecast.selectedWindowName);
+    button.style.setProperty("--provider-color", forecast.meta.color || "var(--teal)");
+    button.title = `${window.label || window.name}，重置 ${formatAccountTime(window.resetsAt)}`;
+    button.innerHTML = `<span>${escapeHtml(window.label || window.name)}</span><strong>${escapeHtml(`${usedPercent.toFixed(0)}%`)}</strong>`;
+    button.addEventListener("click", () => {
+      forecastWindowSelections[forecast.agent] = window.name;
+      renderForecast(forecast.agent);
+    });
+    els.quotaWindowTabs.appendChild(button);
+  }
 }
 
 function formatAccountTime(value) {
@@ -733,9 +779,9 @@ function modelFitStatus(modelFit) {
 function renderAccountRunway(forecast) {
   const account = forecast.account;
   const fit = forecast.quotaFit;
-  els.forecastRunwayTitle.textContent = `${forecast.meta.label} 官方额度窗口`;
+  els.forecastRunwayTitle.textContent = `${forecast.meta.label} · ${account.label}`;
   els.forecastPeriodPill.textContent = account.type === "percent"
-    ? `${formatAccountWindow(account.windowDurationMins)} · 重置 ${formatAccountTime(account.resetAt)}`
+    ? `${account.windowKind === "monthly" ? "月度额度" : formatAccountWindow(account.windowDurationMins)} · 重置 ${formatAccountTime(account.resetAt)}`
     : `账期至 ${formatAccountTime(account.resetAt)}`;
 
   const summary = document.createElement("div");
@@ -866,6 +912,7 @@ function renderForecastRates(forecast) {
 
 function renderForecast(agent = forecastAgent) {
   const forecast = buildForecast(agent);
+  renderQuotaWindowTabs(forecast);
   els.forecastMetricGrid.replaceChildren();
   if (forecast.account) {
     const account = forecast.account;

@@ -78,3 +78,80 @@ test("Kimi managed usage normalizes weekly and short quota windows", async () =>
   assert.equal(snapshot.windows[1].windowDurationMins, 300);
   assert.deepEqual(snapshot.quotaBreakdown.map((entry) => entry.usedPercent), [5, 2]);
 });
+
+test("Kimi membership stats normalize monthly total and Kimi/Code composition", async () => {
+  const { normalizeKimiMembershipStats } = await import("../scripts/sync-account-quotas.mjs");
+  const snapshot = normalizeKimiMembershipStats({
+    subscriptionBalance: {
+      feature: "FEATURE_OMNI",
+      amountUsedRatio: 0.5623,
+      kimiCodeUsedRatio: 0.0292,
+      expireTime: "2026-08-18T00:00:00Z",
+    },
+  }, "2026-07-19T15:00:00.000Z");
+
+  assert.equal(snapshot.windows[0].name, "monthly_membership");
+  assert.equal(snapshot.windows[0].windowKind, "monthly");
+  assert.equal(snapshot.windows[0].usedPercent, 56.23);
+  assert.equal(snapshot.windows[0].remainingPercent, 43.77);
+  assert.equal(snapshot.windows[0].resetsAt, "2026-08-18T00:00:00.000Z");
+  assert.deepEqual(snapshot.quotaBreakdown, [
+    { label: "月度 Kimi", usedPercent: 53.31 },
+    { label: "月度 Code", usedPercent: 2.92 },
+  ]);
+});
+
+test("Kimi quota merge keeps monthly, weekly, and short windows", async () => {
+  const { mergeKimiQuotaSnapshots, normalizeKimiMembershipStats, normalizeKimiUsagePayload } = await import("../scripts/sync-account-quotas.mjs");
+  const membership = normalizeKimiMembershipStats({
+    subscription_balance: {
+      amount_used_ratio: 0.5,
+      kimi_code_used_ratio: 0.1,
+      expire_time: "2026-08-18T00:00:00Z",
+    },
+  }, "2026-07-19T15:00:00.000Z");
+  const code = normalizeKimiUsagePayload({
+    usage: { used: 14, limit: 100, resetTime: "2026-07-25T04:14:58Z" },
+    limits: [{ detail: { used: 38, limit: 100 }, window: { duration: 300, timeUnit: "TIME_UNIT_MINUTE" } }],
+  }, "2026-07-19T15:01:00.000Z");
+  const snapshot = mergeKimiQuotaSnapshots(code, membership);
+
+  assert.equal(snapshot.provider, "kimi-membership-and-code-usage");
+  assert.deepEqual(snapshot.windows.map((window) => window.name), ["monthly_membership", "weekly_limit", "limit_1"]);
+  assert.deepEqual(snapshot.quotaSources, ["kimi-membership-stats", "kimi-code-managed-usage"]);
+});
+
+test("Claude quota template keeps configured and newly discovered reset windows", async () => {
+  const { applyQuotaWindowTemplate, normalizeClaudeUsagePayload } = await import("../scripts/sync-account-quotas.mjs");
+  const quota = {
+    discoverWindows: true,
+    windows: [
+      { name: "five_hour", label: "5 小时额度", windowDurationMins: 300 },
+      { name: "seven_day_fable", label: "Fable 周额度", windowDurationMins: 10080, modelPatterns: ["fable"] },
+    ],
+  };
+  const windows = normalizeClaudeUsagePayload({
+    five_hour: { utilization: 25, resets_at: "2026-07-20T05:00:00Z" },
+    seven_day_fable: { utilization: 40, resets_at: "2026-07-25T00:00:00Z" },
+    future_model_window: { utilization: 12, resets_at: "2026-07-26T00:00:00Z" },
+    extra_usage: { utilization: 5 },
+  }, quota);
+  const snapshot = applyQuotaWindowTemplate({ quota }, { windows });
+
+  assert.deepEqual(snapshot.windows.map((window) => window.name), ["five_hour", "seven_day_fable", "future_model_window"]);
+  assert.equal(snapshot.windows[1].label, "Fable 周额度");
+  assert.deepEqual(snapshot.windows[1].modelPatterns, ["fable"]);
+  assert.equal(snapshot.windows[2].usedPercent, 12);
+  assert.equal(JSON.stringify(snapshot).includes("modelPatterns"), false);
+});
+
+test("model-specific quota windows use only matching cumulative model tokens", async () => {
+  const { quotaWindowUsageAggregate } = await import("../scripts/sync-account-quotas.mjs");
+  const aggregate = quotaWindowUsageAggregate({ modelPatterns: ["fable"] }, {
+    totalTokens: 1000,
+    models: { "claude-fable-5": 250, "claude-sonnet-5": 750 },
+  });
+
+  assert.equal(aggregate.totalTokens, 250);
+  assert.deepEqual(aggregate.models, { "claude-fable-5": 250 });
+});

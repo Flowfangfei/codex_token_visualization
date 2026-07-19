@@ -44,6 +44,11 @@ function clampPercent(value) {
   return Math.min(100, Math.max(0, number));
 }
 
+function roundPercent(value) {
+  const percent = clampPercent(value);
+  return percent === null ? null : Math.round(percent * 10000) / 10000;
+}
+
 function toIsoFromUnixSeconds(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? new Date(number * 1000).toISOString() : null;
@@ -69,6 +74,9 @@ function codexWindow(name, value) {
   const duration = Number(value.windowDurationMins);
   return {
     name,
+    label: typeof (value.label ?? value.display_name ?? value.displayName ?? value.title) === "string"
+      ? String(value.label ?? value.display_name ?? value.displayName ?? value.title)
+      : null,
     usedPercent,
     remainingPercent: 100 - usedPercent,
     windowDurationMins: Number.isFinite(duration) ? duration : null,
@@ -154,12 +162,15 @@ function claudeWindow(name, value, durationMins) {
   if (!value || typeof value !== "object") return null;
   const rawUtilization = Number(value.utilization ?? value.used_percent ?? value.usedPercent);
   if (!Number.isFinite(rawUtilization)) return null;
-  const usedPercent = clampPercent(rawUtilization <= 1 ? rawUtilization * 100 : rawUtilization);
+  const usedPercent = roundPercent(rawUtilization <= 1 ? rawUtilization * 100 : rawUtilization);
   if (usedPercent === null) return null;
   return {
     name,
+    label: typeof (value.label ?? value.display_name ?? value.displayName ?? value.title) === "string"
+      ? String(value.label ?? value.display_name ?? value.displayName ?? value.title)
+      : null,
     usedPercent,
-    remainingPercent: 100 - usedPercent,
+    remainingPercent: roundPercent(100 - usedPercent),
     windowDurationMins: durationMins,
     resetsAt: toIso(value.resets_at ?? value.resetsAt ?? value.reset_at ?? value.resetAt),
   };
@@ -178,7 +189,32 @@ function cursorWindow(name, label, usedPercent, durationMins, resetsAt) {
   };
 }
 
-async function fetchClaudeQuota() {
+function inferredClaudeWindowMinutes(name) {
+  if (/five[_-]?hour/i.test(name)) return 300;
+  if (/seven[_-]?day/i.test(name)) return 10080;
+  if (/month/i.test(name)) return 43200;
+  return null;
+}
+
+export function normalizeClaudeUsagePayload(payload, quotaConfig = {}) {
+  const definitions = Array.isArray(quotaConfig?.windows) ? quotaConfig.windows : [];
+  const definitionNames = definitions.map((definition) => definition.name).filter(Boolean);
+  const discoveredNames = quotaConfig?.discoverWindows === false
+    ? []
+    : Object.entries(payload || {})
+        .filter(([, value]) => value && typeof value === "object" && !Array.isArray(value))
+        .map(([name]) => name);
+  return [...new Set([...definitionNames, ...discoveredNames])]
+    .map((name) => {
+      const definition = definitions.find((entry) => entry.name === name);
+      const durationMins = Number(definition?.windowDurationMins) || inferredClaudeWindowMinutes(name);
+      const window = claudeWindow(name, payload?.[name], durationMins);
+      return window && (definition || window.resetsAt) ? window : null;
+    })
+    .filter(Boolean);
+}
+
+async function fetchClaudeQuota(provider) {
   const credentialPath = join(homedir(), ".claude", ".credentials.json");
   if (!existsSync(credentialPath)) throw new Error("Claude OAuth credentials were not found");
   const credentials = readJson(credentialPath);
@@ -197,10 +233,7 @@ async function fetchClaudeQuota() {
     });
     if (!response.ok) throw new Error(`Claude usage endpoint returned HTTP ${response.status}`);
     const payload = await response.json();
-    const windows = [
-      claudeWindow("five_hour", payload?.five_hour, 300),
-      claudeWindow("seven_day", payload?.seven_day, 10080),
-    ].filter(Boolean);
+    const windows = normalizeClaudeUsagePayload(payload, provider?.quota);
     if (!windows.length) throw new Error("Claude usage response did not include usage windows");
     return {
       source: "claude",
@@ -214,6 +247,59 @@ async function fetchClaudeQuota() {
     // Do not let an OAuth credential remain reachable after the account request.
     credentials.claudeAiOauth.accessToken = null;
   }
+}
+
+function humanizeQuotaWindowName(name) {
+  return String(name || "额度窗口")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+export function applyQuotaWindowTemplate(provider, snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.windows)) return snapshot;
+  const definitions = new Map(
+    (Array.isArray(provider?.quota?.windows) ? provider.quota.windows : [])
+      .filter((definition) => definition?.name)
+      .map((definition) => [definition.name, definition]),
+  );
+  snapshot.windows = snapshot.windows.map((window) => {
+    const definition = definitions.get(window.name);
+    const normalized = {
+      ...window,
+      label: window.label || definition?.label || humanizeQuotaWindowName(window.name),
+      windowDurationMins: Number(window.windowDurationMins) || Number(definition?.windowDurationMins) || null,
+      windowKind: window.windowKind || definition?.windowKind || null,
+    };
+    if (definition?.selectable === false) normalized.selectable = false;
+    if (Array.isArray(definition?.modelPatterns) && definition.modelPatterns.length) {
+      Object.defineProperty(normalized, "modelPatterns", {
+        value: definition.modelPatterns.map(String),
+        enumerable: false,
+      });
+    }
+    return normalized;
+  });
+  return snapshot;
+}
+
+export function quotaWindowUsageAggregate(window, usageAggregate) {
+  const totalTokens = Number.isFinite(Number(usageAggregate?.totalTokens)) ? Number(usageAggregate.totalTokens) : null;
+  const models = usageAggregate?.models && typeof usageAggregate.models === "object" ? usageAggregate.models : {};
+  const patterns = (Array.isArray(window?.modelPatterns) ? window.modelPatterns : [])
+    .map((pattern) => String(pattern).trim().toLowerCase())
+    .filter(Boolean);
+  if (!patterns.length) return { totalTokens, models };
+
+  const matchingModels = Object.fromEntries(
+    Object.entries(models).filter(([model]) => {
+      const normalized = model.toLowerCase();
+      return patterns.some((pattern) => normalized.includes(pattern));
+    }),
+  );
+  return {
+    totalTokens: Object.values(matchingModels).reduce((sum, value) => sum + (Number(value) || 0), 0),
+    models: matchingModels,
+  };
 }
 
 function cursorDatabasePath() {
@@ -457,6 +543,12 @@ function kimiDesktopCodeHome() {
     || join(appData, "kimi-desktop", "daimon-share", "daimon", "runtime", "kimi-code", "home");
 }
 
+function kimiDesktopTokenStorePath() {
+  const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+  return process.env.KIMI_DESKTOP_TOKEN_STORE
+    || join(appData, "kimi-desktop", "bridge-store", "token-store.json");
+}
+
 function kimiCredentialPath() {
   return process.env.KIMI_CODE_CREDENTIAL_PATH || join(kimiCodeHome(), "credentials", "kimi-code.json");
 }
@@ -565,7 +657,7 @@ function kimiUsageRow(raw, fallbackName, fallbackLabel) {
   const remaining = Number(row.remaining ?? row.left);
   if (!Number.isFinite(used) && Number.isFinite(limit) && Number.isFinite(remaining)) used = limit - remaining;
   const explicitPercent = Number(row.used_percent ?? row.usedPercent ?? row.percent ?? row.percentage);
-  const usedPercent = clampPercent(Number.isFinite(explicitPercent)
+  const usedPercent = roundPercent(Number.isFinite(explicitPercent)
     ? explicitPercent
     : Number.isFinite(limit) && limit > 0 && Number.isFinite(used)
       ? (used / limit) * 100
@@ -580,7 +672,7 @@ function kimiUsageRow(raw, fallbackName, fallbackLabel) {
     name,
     label,
     usedPercent,
-    remainingPercent: 100 - usedPercent,
+    remainingPercent: roundPercent(100 - usedPercent),
     windowDurationMins: kimiWindowMinutes(row),
     resetsAt: kimiResetAt(row),
     limit: Number.isFinite(limit) ? limit : null,
@@ -591,11 +683,13 @@ function kimiUsageRow(raw, fallbackName, fallbackLabel) {
 
 export function normalizeKimiUsagePayload(payload, fetchedAt = new Date().toISOString()) {
   const rows = [];
-  const summary = kimiUsageRow(payload?.usage, "weekly_limit", "Weekly limit");
+  const summary = kimiUsageRow(payload?.usage, "weekly_limit", "Kimi Code 周额度");
   if (summary) rows.push({ ...summary, windowDurationMins: summary.windowDurationMins || 10080 });
   const limits = Array.isArray(payload?.limits) ? payload.limits : [];
   limits.forEach((entry, index) => {
-    const row = kimiUsageRow(entry, `limit_${index + 1}`, `Usage limit ${index + 1}`);
+    const duration = kimiWindowMinutes(entry);
+    const fallbackLabel = duration === 300 ? "Kimi Code 5 小时额度" : `Kimi Code 额度 ${index + 1}`;
+    const row = kimiUsageRow(entry, `limit_${index + 1}`, fallbackLabel);
     if (row) rows.push(row);
   });
   const deduplicated = [...new Map(rows.map((row) => [`${row.name}:${row.resetsAt || ""}:${row.windowDurationMins || ""}`, row])).values()];
@@ -608,6 +702,98 @@ export function normalizeKimiUsagePayload(payload, fetchedAt = new Date().toISOS
     windows: deduplicated,
     quotaBreakdown: deduplicated.map((row) => ({ label: row.label, usedPercent: row.usedPercent })),
   };
+}
+
+function kimiPercentRatio(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  return roundPercent(number >= 0 && number <= 1 ? number * 100 : number);
+}
+
+export function normalizeKimiMembershipStats(payload, fetchedAt = new Date().toISOString()) {
+  const balance = payload?.subscriptionBalance ?? payload?.subscription_balance;
+  if (!balance || typeof balance !== "object") {
+    throw new Error("Kimi membership response did not include a subscription balance");
+  }
+  const usedPercent = kimiPercentRatio(balance.amountUsedRatio ?? balance.amount_used_ratio);
+  const codeUsedPercent = kimiPercentRatio(balance.kimiCodeUsedRatio ?? balance.kimi_code_used_ratio) ?? 0;
+  const resetsAt = toIso(balance.expireTime ?? balance.expire_time);
+  if (usedPercent === null || !resetsAt) {
+    throw new Error("Kimi membership response did not include monthly usage or reset time");
+  }
+  const kimiUsedPercent = roundPercent(usedPercent - codeUsedPercent);
+  const remainingPercent = roundPercent(100 - usedPercent);
+  return {
+    source: "kimi",
+    fetchedAt,
+    provider: "kimi-membership-stats",
+    planType: null,
+    windows: [{
+      name: "monthly_membership",
+      label: "月度总额",
+      windowKind: "monthly",
+      usedPercent,
+      remainingPercent,
+      // The subscription anniversary is a calendar-month cycle; 30 days is a ranking hint only.
+      windowDurationMins: 43200,
+      resetsAt,
+      limit: 100,
+      used: usedPercent,
+      remaining: remainingPercent,
+    }],
+    quotaBreakdown: [
+      { label: "月度 Kimi", usedPercent: kimiUsedPercent },
+      { label: "月度 Code", usedPercent: codeUsedPercent },
+    ],
+  };
+}
+
+export function mergeKimiQuotaSnapshots(codeSnapshot, membershipSnapshot) {
+  const snapshots = [membershipSnapshot, codeSnapshot].filter(Boolean);
+  if (!snapshots.length) return null;
+  if (snapshots.length === 1) return snapshots[0];
+  return {
+    source: "kimi",
+    fetchedAt: snapshots.map((snapshot) => snapshot.fetchedAt).filter(Boolean).sort().at(-1) || new Date().toISOString(),
+    provider: "kimi-membership-and-code-usage",
+    planType: codeSnapshot?.planType || membershipSnapshot?.planType || null,
+    windows: snapshots.flatMap((snapshot) => snapshot.windows || []),
+    quotaBreakdown: membershipSnapshot?.quotaBreakdown || [],
+    quotaSources: snapshots.map((snapshot) => snapshot.provider).filter(Boolean),
+  };
+}
+
+async function fetchKimiMembershipQuota() {
+  const tokenStorePath = kimiDesktopTokenStorePath();
+  if (!existsSync(tokenStorePath)) throw new Error("Kimi desktop membership credentials were not found");
+  const tokenStore = readJson(tokenStorePath);
+  const accessToken = tokenStore?.tokens?.access_token;
+  if (typeof accessToken !== "string" || !accessToken) {
+    throw new Error("Kimi desktop membership access token was not found");
+  }
+  try {
+    const response = await fetch(
+      "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats",
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${accessToken}`,
+          "connect-protocol-version": "1",
+          "content-type": "application/json",
+          "x-language": "zh-CN",
+          "x-msh-platform": "web",
+        },
+        body: JSON.stringify({ domain: "DOMAIN_KIMI" }),
+        signal: AbortSignal.timeout(12000),
+      },
+    );
+    if (!response.ok) throw new Error(`Kimi membership stats endpoint returned HTTP ${response.status}`);
+    return normalizeKimiMembershipStats(await response.json());
+  } finally {
+    tokenStore.tokens.access_token = null;
+    tokenStore.tokens.refresh_token = null;
+  }
 }
 
 async function fetchKimiQuota() {
@@ -910,14 +1096,17 @@ function cleanupObservations(source, retentionDays = 120) {
   }
 }
 
-function observationWindow(snapshot) {
+function observationWindows(snapshot) {
   return [...(snapshot?.windows || [])]
-    .filter((window) => Number.isFinite(Number(window?.usedPercent)))
-    .sort((a, b) => (Number(b?.windowDurationMins) || 0) - (Number(a?.windowDurationMins) || 0))[0] || null;
+    .filter((window) => window?.selectable !== false && Number.isFinite(Number(window?.usedPercent)))
+    .sort((a, b) => (Number(b?.windowDurationMins) || 0) - (Number(a?.windowDurationMins) || 0));
 }
 
 export function detectObservationSegment(prior, current) {
   if (!prior) return { newSegment: true, resetDetected: false, reason: "first-observation" };
+  if (prior.windowName && current.windowName && prior.windowName !== current.windowName) {
+    return { newSegment: true, resetDetected: false, reason: "quota-window-changed" };
+  }
   const priorReset = prior.resetAt ? new Date(prior.resetAt).getTime() : null;
   const currentReset = current.resetAt ? new Date(current.resetAt).getTime() : null;
   const resetMissingChanged = (priorReset === null) !== (currentReset === null);
@@ -948,10 +1137,14 @@ export function compactObservations(observations, maxEntries = 96) {
   const limit = Math.max(1, Math.floor(Number(maxEntries) || 96));
   if (entries.length <= limit) return entries;
 
-  const protectedIndexes = new Set([0, entries.length - 1]);
-  for (let index = 1; index < entries.length; index += 1) {
-    const previous = entries[index - 1];
+  const protectedIndexes = new Set();
+  const latestIndexByWindow = new Map();
+  for (let index = 0; index < entries.length; index += 1) {
     const current = entries[index];
+    const windowName = current?.windowName || "quota-window";
+    const previousIndex = latestIndexByWindow.get(windowName);
+    if (previousIndex === undefined) protectedIndexes.add(index);
+    const previous = previousIndex === undefined ? null : entries[previousIndex];
     const previousSegment = previous?.segment === null || previous?.segment === undefined
       ? null
       : String(previous.segment);
@@ -959,11 +1152,13 @@ export function compactObservations(observations, maxEntries = 96) {
       ? null
       : String(current.segment);
     const segmentChanged = previousSegment !== null && currentSegment !== null && previousSegment !== currentSegment;
-    if (current?.resetDetected || segmentChanged) {
-      protectedIndexes.add(index - 1);
+    if (previous && (current?.resetDetected || segmentChanged)) {
+      protectedIndexes.add(previousIndex);
       protectedIndexes.add(index);
     }
+    latestIndexByWindow.set(windowName, index);
   }
+  latestIndexByWindow.forEach((index) => protectedIndexes.add(index));
 
   const selected = [...protectedIndexes].sort((a, b) => a - b);
   if (selected.length > limit) {
@@ -980,41 +1175,49 @@ export function compactObservations(observations, maxEntries = 96) {
 function writeQuotaObservation(snapshot, usageAggregate) {
   const source = snapshot.source;
   cleanupObservations(source);
-  const window = observationWindow(snapshot);
-  if (!window) return { recorded: false, file: null, reason: "quota window unavailable" };
+  const windows = observationWindows(snapshot);
+  if (!windows.length) return { recorded: false, file: null, reason: "quota window unavailable" };
 
-  const prior = allObservations(source).at(-1) || null;
+  const history = allObservations(source);
   const fetchedAt = snapshot.fetchedAt || new Date().toISOString();
-  const usedPercent = Number(window.usedPercent);
-  const totalTokens = Number.isFinite(Number(usageAggregate?.totalTokens)) ? Number(usageAggregate.totalTokens) : null;
-  const segmentDecision = detectObservationSegment(prior, {
-    resetAt: window.resetsAt || null,
-    usedPercent,
-    totalTokens,
-  });
-  const newSegment = segmentDecision.newSegment;
-  const segment = newSegment ? Number(prior?.segment || 0) + 1 : Number(prior.segment || 1);
-  const elapsedMinutes = prior ? (new Date(fetchedAt).getTime() - new Date(prior.fetchedAt).getTime()) / 60000 : Infinity;
-  const quotaMoved = !prior || Math.abs(usedPercent - Number(prior.usedPercent)) >= 0.1;
-  const usageMoved = !prior || totalTokens === null || prior.totalTokens === null || Math.abs(totalTokens - Number(prior.totalTokens)) >= 50_000;
-  if (!newSegment && !quotaMoved && !(elapsedMinutes >= 15 && usageMoved)) {
-    return { recorded: false, file: null, reason: "unchanged observation" };
-  }
+  const additions = [];
+  for (const window of windows) {
+    const windowName = window.name || "quota-window";
+    const prior = [...history, ...additions].filter((entry) => entry.windowName === windowName).at(-1) || null;
+    const usedPercent = Number(window.usedPercent);
+    const windowUsage = quotaWindowUsageAggregate(window, usageAggregate);
+    const totalTokens = windowUsage.totalTokens;
+    const segmentDecision = detectObservationSegment(prior, {
+      windowName,
+      resetAt: window.resetsAt || null,
+      usedPercent,
+      totalTokens,
+    });
+    const newSegment = segmentDecision.newSegment;
+    const segment = newSegment ? Number(prior?.segment || 0) + 1 : Number(prior.segment || 1);
+    const elapsedMinutes = prior ? (new Date(fetchedAt).getTime() - new Date(prior.fetchedAt).getTime()) / 60000 : Infinity;
+    const quotaMoved = !prior || Math.abs(usedPercent - Number(prior.usedPercent)) >= 0.1;
+    const usageMoved = !prior || totalTokens === null || prior.totalTokens === null || Math.abs(totalTokens - Number(prior.totalTokens)) >= 50_000;
+    if (!newSegment && !quotaMoved && !(elapsedMinutes >= 15 && usageMoved)) continue;
 
-  const observation = {
-    fetchedAt,
-    segment,
-    segmentStartedAt: newSegment ? fetchedAt : prior.segmentStartedAt || prior.fetchedAt,
-    windowName: window.name || "quota-window",
-    windowLabel: window.label || null,
-    usedPercent,
-    resetAt: window.resetsAt || null,
-    windowDurationMins: Number(window.windowDurationMins) || null,
-    totalTokens,
-    models: usageAggregate?.models || {},
-    resetDetected: segmentDecision.resetDetected,
-    resetReason: segmentDecision.reason,
-  };
+    additions.push({
+      fetchedAt,
+      segment,
+      segmentStartedAt: newSegment ? fetchedAt : prior.segmentStartedAt || prior.fetchedAt,
+      windowName,
+      windowLabel: window.label || null,
+      windowKind: window.windowKind || null,
+      usedPercent,
+      resetAt: window.resetsAt || null,
+      windowDurationMins: Number(window.windowDurationMins) || null,
+      totalTokens,
+      models: windowUsage.models,
+      resetDetected: segmentDecision.resetDetected,
+      resetReason: segmentDecision.reason,
+    });
+  }
+  if (!additions.length) return { recorded: false, file: null, reason: "unchanged observations" };
+
   const logDir = join(OBSERVATION_ROOT, source);
   const filePath = join(logDir, `quota-observations-${localDateKey()}.json`);
   mkdirSync(logDir, { recursive: true });
@@ -1027,10 +1230,19 @@ function writeQuotaObservation(snapshot, usageAggregate) {
       observations = [];
     }
   }
-  observations.push(observation);
+  observations.push(...additions);
   observations = compactObservations(observations, 96);
   writeFileSync(filePath, `${JSON.stringify({ source, date: localDateKey(), observations }, null, 2)}\n`, "utf8");
-  return { recorded: true, file: filePath, segment, resetDetected: observation.resetDetected };
+  return {
+    recorded: true,
+    file: filePath,
+    windowCount: additions.length,
+    windows: additions.map((observation) => ({
+      name: observation.windowName,
+      segment: observation.segment,
+      resetDetected: observation.resetDetected,
+    })),
+  };
 }
 
 function snapshotFile(source) {
@@ -1067,11 +1279,23 @@ const QUOTA_ADAPTERS = {
   },
   "kimi-managed-usage": async () => {
     const usage = readKimiUsage();
-    try {
-      return { snapshot: await fetchKimiQuota(), usage };
-    } catch (error) {
-      return { snapshot: null, usage, snapshotError: safeError(error) };
-    }
+    const [codeResult, membershipResult] = await Promise.allSettled([
+      fetchKimiQuota(),
+      fetchKimiMembershipQuota(),
+    ]);
+    const snapshot = mergeKimiQuotaSnapshots(
+      codeResult.status === "fulfilled" ? codeResult.value : null,
+      membershipResult.status === "fulfilled" ? membershipResult.value : null,
+    );
+    const warnings = [codeResult, membershipResult]
+      .filter((result) => result.status === "rejected")
+      .map((result) => safeError(result.reason));
+    return {
+      snapshot,
+      usage,
+      snapshotError: snapshot ? null : warnings.join("; "),
+      snapshotWarnings: warnings,
+    };
   },
 };
 
@@ -1080,8 +1304,13 @@ async function loadQuota(source) {
   const adapter = QUOTA_ADAPTERS[provider?.quota?.adapter];
   if (!adapter) throw new Error(`No quota adapter is registered for ${source}`);
   const loaded = await adapter(provider);
-  if (loaded?.snapshot) loaded.snapshot.source = provider.id;
-  else if (loaded && !loaded.usage) loaded.source = provider.id;
+  if (loaded?.snapshot) {
+    loaded.snapshot.source = provider.id;
+    applyQuotaWindowTemplate(provider, loaded.snapshot);
+  } else if (loaded && !loaded.usage) {
+    loaded.source = provider.id;
+    applyQuotaWindowTemplate(provider, loaded);
+  }
   if (loaded?.usage) loaded.usage.source = provider.id;
   return loaded;
 }
@@ -1114,7 +1343,17 @@ async function main() {
       }
       const filePath = writeSnapshot(snapshot);
       const observation = writeQuotaObservation(snapshot, currentUsageAggregate(source, loaded?.usage));
-      results.push({ source, ok: true, skipped: false, file: filePath, usageFile, observation, snapshot });
+      results.push({
+        source,
+        ok: true,
+        partial: Boolean(loaded?.snapshotWarnings?.length),
+        skipped: false,
+        file: filePath,
+        usageFile,
+        warnings: loaded?.snapshotWarnings || [],
+        observation,
+        snapshot,
+      });
     } catch (error) {
       results.push({ source, ok: false, skipped: false, error: safeError(error) });
     }

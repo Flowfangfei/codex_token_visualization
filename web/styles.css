@@ -340,6 +340,7 @@ main {
 
 .forecast-heading,
 .forecast-agent-tabs,
+.quota-window-tabs,
 .forecast-metric-grid,
 .forecast-layout,
 .forecast-rate-list,
@@ -382,6 +383,56 @@ main {
 .forecast-agent-tab:hover,
 .forecast-agent-tab.is-active {
   background: var(--provider-color, var(--teal));
+  color: var(--paper);
+}
+
+.quota-window-tabs {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(150px, 1fr);
+  gap: 1px;
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--line);
+}
+
+.quota-window-tab {
+  display: grid;
+  min-height: 48px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 7px 12px;
+  background: rgba(255, 250, 242, 0.94);
+  color: var(--ink-soft);
+  cursor: pointer;
+  text-align: left;
+}
+
+.quota-window-tab span {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quota-window-tab strong {
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", "Noto Serif SC", serif;
+  font-size: 20px;
+  font-weight: 400;
+}
+
+.quota-window-tab:hover,
+.quota-window-tab.is-active {
+  background: var(--provider-color, var(--teal));
+  color: var(--paper);
+}
+
+.quota-window-tab:hover strong,
+.quota-window-tab.is-active strong {
   color: var(--paper);
 }
 
@@ -1168,6 +1219,11 @@ tbody tr:hover {
 
   .forecast-agent-tabs {
     width: 100%;
+  }
+
+  .quota-window-tabs {
+    width: 100%;
+    grid-auto-columns: minmax(145px, 72vw);
   }
 
   .primary-button {

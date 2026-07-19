@@ -38,7 +38,14 @@ const PROVIDERS = Object.freeze([
       logRoot: usageDirectory("codex", "CODEX_USAGE_LOG_DIR"),
       legacyRoots: [path.join(ROOT, "codex-usage-logs", "daily")],
     },
-    quota: { adapter: "codex-app-server" },
+    quota: {
+      adapter: "codex-app-server",
+      discoverWindows: true,
+      windows: [
+        { name: "primary", label: "主要额度" },
+        { name: "secondary", label: "次要额度" },
+      ],
+    },
     sourceDescription: "ccusage codex daily + Codex app-server",
   }),
   provider({
@@ -58,7 +65,17 @@ const PROVIDERS = Object.freeze([
       ccusageArgs: ["claude", "daily"],
       logRoot: usageDirectory("claude", "CLAUDE_USAGE_LOG_DIR"),
     },
-    quota: { adapter: "claude-oauth" },
+    quota: {
+      adapter: "claude-oauth",
+      discoverWindows: true,
+      windows: [
+        { name: "five_hour", label: "5 小时额度", windowDurationMins: 300, windowKind: "rolling" },
+        { name: "seven_day", label: "周总额度", windowDurationMins: 10080, windowKind: "weekly" },
+        { name: "seven_day_opus", label: "Opus 周额度", windowDurationMins: 10080, windowKind: "weekly", modelPatterns: ["opus"] },
+        { name: "seven_day_sonnet", label: "Sonnet 周额度", windowDurationMins: 10080, windowKind: "weekly", modelPatterns: ["sonnet"] },
+        { name: "seven_day_fable", label: "Fable 周额度", windowDurationMins: 10080, windowKind: "weekly", modelPatterns: ["fable"] },
+      ],
+    },
     sourceDescription: "ccusage claude daily + Claude OAuth usage",
   }),
   provider({
@@ -77,7 +94,15 @@ const PROVIDERS = Object.freeze([
       filePrefix: "cursor-usage",
       logRoot: usageDirectory("cursor", "CURSOR_USAGE_LOG_DIR"),
     },
-    quota: { adapter: "cursor-account" },
+    quota: {
+      adapter: "cursor-account",
+      discoverWindows: true,
+      windows: [
+        { name: "included_pro_total", label: "Included in Pro", windowKind: "billing" },
+        { name: "auto_composer", label: "Auto + Composer", windowKind: "breakdown", selectable: false },
+        { name: "api", label: "API", windowKind: "breakdown", selectable: false },
+      ],
+    },
     sourceDescription: "Cursor local account database + account usage APIs",
   }),
   provider({
@@ -100,8 +125,16 @@ const PROVIDERS = Object.freeze([
       filePrefix: "kimi-usage",
       logRoot: usageDirectory("kimi", "KIMI_USAGE_LOG_DIR"),
     },
-    quota: { adapter: "kimi-managed-usage" },
-    sourceDescription: "Kimi Code CLI and desktop wire logs + managed usage API",
+    quota: {
+      adapter: "kimi-managed-usage",
+      discoverWindows: true,
+      windows: [
+        { name: "monthly_membership", label: "月度总额", windowDurationMins: 43200, windowKind: "monthly" },
+        { name: "weekly_limit", label: "Kimi Code 周额度", windowDurationMins: 10080, windowKind: "weekly" },
+        { name: "limit_1", label: "Kimi Code 5 小时额度", windowDurationMins: 300, windowKind: "rolling" },
+      ],
+    },
+    sourceDescription: "Kimi Code CLI and desktop wire logs + Code and membership usage APIs",
   }),
 ]);
 

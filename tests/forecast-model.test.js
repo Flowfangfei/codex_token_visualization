@@ -77,7 +77,12 @@ test("learns from multiple observations inside one reset segment on the same day
 
 test("quota observation segmentation detects resets inside the same day", async () => {
   const { detectObservationSegment } = await import("../scripts/sync-account-quotas.mjs");
-  const prior = { resetAt: "2026-07-17T00:00:00.000Z", usedPercent: 82, totalTokens: 500_000_000 };
+  const prior = { windowName: "weekly_limit", resetAt: "2026-07-17T00:00:00.000Z", usedPercent: 82, totalTokens: 500_000_000 };
+
+  assert.equal(
+    detectObservationSegment(prior, { ...prior, windowName: "monthly_membership" }).reason,
+    "quota-window-changed"
+  );
 
   assert.equal(
     detectObservationSegment(prior, { ...prior, resetAt: "2026-07-24T00:00:00.000Z" }).reason,
@@ -145,6 +150,20 @@ test("observation compaction preserves multiple reset boundaries", async () => {
   assert.equal(compacted.length, 96);
   assert.deepEqual(compacted.map((observation) => observation.id), [...compacted].map((observation) => observation.id).sort((a, b) => a - b));
   [0, 39, 40, 79, 80, 119].forEach((id) => assert.equal(ids.has(id), true));
+});
+
+test("observation compaction retains the first and latest point for every quota window", async () => {
+  const { compactObservations } = await import("../scripts/sync-account-quotas.mjs");
+  const observations = Array.from({ length: 120 }, (_, index) => ({
+    id: index,
+    windowName: index % 3 === 0 ? "monthly" : index % 3 === 1 ? "weekly" : "five_hour",
+    segment: index < 60 ? 1 : 2,
+    resetDetected: index === 60 || index === 61 || index === 62,
+  }));
+  const compacted = compactObservations(observations, 24);
+  const ids = new Set(compacted.map((observation) => observation.id));
+
+  [0, 1, 2, 57, 58, 59, 60, 61, 62, 117, 118, 119].forEach((id) => assert.equal(ids.has(id), true));
 });
 
 test("segmented quota fit keeps historical intervals after a new cycle starts", () => {
