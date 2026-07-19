@@ -100,6 +100,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.p
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\open-dashboard.ps1 -Port 8787
 ```
 
+启动脚本会重启 `8787` 上已有的 AI Token Ledger Node 进程，确保新版前端与当前后端来自同一次启动；如果该端口属于其他应用，脚本会拒绝终止它并提示改用其他端口。
+
 浏览器地址：<http://127.0.0.1:8787>
 
 开发时也可以直接启动：
