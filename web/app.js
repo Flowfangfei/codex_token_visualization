@@ -24,11 +24,16 @@ const els = {
   tableTitle: document.querySelector("#tableTitle"),
   refreshBtn: document.querySelector("#refreshBtn"),
   exportBtn: document.querySelector("#exportBtn"),
+  updateBanner: document.querySelector("#updateBanner"),
+  updateText: document.querySelector("#updateText"),
+  updateLink: document.querySelector("#updateLink"),
+  updateClose: document.querySelector("#updateClose"),
   resetCredits: document.querySelector("#resetCredits"),
   resetSummary: document.querySelector("#resetSummary"),
   resetCreditList: document.querySelector("#resetCreditList"),
   forecastView: document.querySelector("#forecastView"),
-  forecastAgentTabs: [...document.querySelectorAll(".forecast-agent-tab")],
+  forecastAgentTabs: document.querySelector("#forecastAgentTabs"),
+  providerViewTabs: document.querySelector("#providerViewTabs"),
   forecastMetricGrid: document.querySelector("#forecastMetricGrid"),
   forecastRunwayTitle: document.querySelector("#forecastRunwayTitle"),
   forecastPeriodPill: document.querySelector("#forecastPeriodPill"),
@@ -36,7 +41,7 @@ const els = {
   forecastAdvice: document.querySelector("#forecastAdvice"),
   forecastSourcePill: document.querySelector("#forecastSourcePill"),
   forecastRateList: document.querySelector("#forecastRateList"),
-  viewTabs: [...document.querySelectorAll(".view-tab")],
+  viewTabs: document.querySelector(".view-tabs"),
 };
 
 const VIEW_CONFIGS = {
@@ -44,7 +49,7 @@ const VIEW_CONFIGS = {
     source: "all",
     label: "总览",
     exportSource: "all",
-    subtitle: "Codex + Claude Code",
+    subtitle: "全部已注册智能体",
     trendTitle: "总使用趋势",
     breakdownTitle: "最新总构成",
   },
@@ -53,30 +58,6 @@ const VIEW_CONFIGS = {
     label: "额度预测",
     exportSource: "everything",
     subtitle: "本地用量速率与周期预算",
-  },
-  codex: {
-    source: "codex",
-    label: "Codex",
-    exportSource: "codex",
-    subtitle: "ChatGPT Codex 本地日志",
-    trendTitle: "Codex 使用趋势",
-    breakdownTitle: "Codex Token 构成",
-  },
-  claude: {
-    source: "claude",
-    label: "Claude Code",
-    exportSource: "claude",
-    subtitle: "Claude Code 本地日志",
-    trendTitle: "Claude 使用趋势",
-    breakdownTitle: "Claude Token 构成",
-  },
-  cursor: {
-    source: "cursor",
-    label: "Cursor",
-    exportSource: "everything",
-    subtitle: "Cursor 本地用量数据",
-    trendTitle: "Cursor 使用趋势",
-    breakdownTitle: "Cursor Token 构成",
   },
   sources: {
     source: "all",
@@ -88,9 +69,107 @@ const VIEW_CONFIGS = {
 
 let currentView = "overview";
 let latestResetCredits = null;
-let forecastAgent = "codex";
+let providerCatalog = [];
+let providerMeta = {};
+let forecastAgent = null;
 let forecastSnapshots = {};
 let forecastQuotas = {};
+let visibleUpdateId = null;
+
+function viewTabElements() {
+  return [...document.querySelectorAll(".view-tab")];
+}
+
+function forecastTabElements() {
+  return [...document.querySelectorAll(".forecast-agent-tab")];
+}
+
+function configureProviders(providers) {
+  providerCatalog = Array.isArray(providers) ? providers.filter((entry) => entry?.id && entry?.label) : [];
+  providerMeta = Object.fromEntries(providerCatalog.map((entry) => [entry.id, entry]));
+
+  els.providerViewTabs.replaceChildren();
+  els.forecastAgentTabs.replaceChildren();
+  for (const provider of providerCatalog) {
+    FORECAST_AGENT_META[provider.id] = provider;
+    VIEW_CONFIGS[provider.id] = {
+      source: provider.id,
+      label: provider.label,
+      exportSource: "everything",
+      subtitle: provider.subtitle,
+      trendTitle: provider.trendTitle,
+      breakdownTitle: provider.breakdownTitle,
+      resetCredits: provider.resetCredits,
+    };
+    if (provider.navigation !== false) {
+      const tab = document.createElement("button");
+      tab.className = "view-tab";
+      tab.type = "button";
+      tab.dataset.view = provider.id;
+      tab.textContent = provider.label;
+      tab.style.setProperty("--provider-color", provider.color || "var(--rust)");
+      els.providerViewTabs.appendChild(tab);
+    }
+    if (provider.forecast !== false) {
+      const tab = document.createElement("button");
+      tab.className = "forecast-agent-tab";
+      tab.type = "button";
+      tab.dataset.forecastAgent = provider.id;
+      tab.setAttribute("role", "tab");
+      tab.textContent = provider.shortLabel || provider.label;
+      tab.style.setProperty("--provider-color", provider.color || "var(--teal)");
+      els.forecastAgentTabs.appendChild(tab);
+    }
+  }
+  forecastAgent = providerCatalog.find((entry) => entry.forecast !== false)?.id || null;
+}
+
+async function loadProviderCatalog() {
+  const response = await fetch("/api/providers", { cache: "no-store" });
+  if (!response.ok) throw new Error(`Provider registry HTTP ${response.status}`);
+  const payload = await response.json();
+  configureProviders(payload.providers);
+}
+
+function dismissedUpdateId() {
+  try {
+    return localStorage.getItem("ai-token-ledger-dismissed-update");
+  } catch (_) {
+    return null;
+  }
+}
+
+function hideUpdateBanner({ remember = false } = {}) {
+  els.updateBanner.classList.add("is-hidden");
+  if (remember && visibleUpdateId) {
+    try {
+      localStorage.setItem("ai-token-ledger-dismissed-update", visibleUpdateId);
+    } catch (_) {
+      // Private browsing can disable persistent storage; closing still works for this page.
+    }
+  }
+}
+
+async function loadUpdateStatus() {
+  hideUpdateBanner();
+  try {
+    const response = await fetch("/api/update-status", { cache: "no-store" });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const safeUrl = typeof payload.compareUrl === "string" && payload.compareUrl.startsWith("https://github.com/");
+    const updateId = typeof payload.updateId === "string" && /^[a-f0-9]{12}$/i.test(payload.updateId)
+      ? payload.updateId
+      : null;
+    if (!payload.updateAvailable || !safeUrl || !updateId || dismissedUpdateId() === updateId) return;
+    visibleUpdateId = updateId;
+    const count = Math.max(1, Number(payload.aheadBy) || 1);
+    els.updateText.textContent = `GitHub 的 ${payload.branch || "main"} 分支比本地多 ${count} 个提交。`;
+    els.updateLink.href = payload.compareUrl;
+    els.updateBanner.classList.remove("is-hidden");
+  } catch (_) {
+    hideUpdateBanner();
+  }
+}
 
 const monthIndex = new Map(
   ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].map(
@@ -175,17 +254,7 @@ function formatPercent(value) {
   return `${((Number(value) || 0) * 100).toFixed(1)}%`;
 }
 
-const FORECAST_AGENT_META = {
-  codex: { label: "Codex" },
-  claude: { label: "Claude Code" },
-  cursor: { label: "Cursor" },
-};
-
-const FORECAST_DEFAULT_PLANS = {
-  codex: "ChatGPT Pro 5x",
-  claude: "Claude Max 5x",
-  cursor: "Cursor",
-};
+const FORECAST_AGENT_META = {};
 
 function localDateKey(date = new Date()) {
   const pad = (value) => String(value).padStart(2, "0");
@@ -238,7 +307,7 @@ function clamp(value, min, max) {
 
 function defaultForecastPlan(agent = forecastAgent) {
   return {
-    subscriptionPlan: FORECAST_DEFAULT_PLANS[agent] || "",
+    subscriptionPlan: providerMeta[agent]?.label || agent || "",
     accountSyncEnabled: true,
     budgetTokens: null,
     periodEndsOn: null,
@@ -710,11 +779,13 @@ function renderAccountRunway(forecast) {
 
   const dates = document.createElement("div");
   dates.className = "runway-dates";
-  const cursorBreakdown = forecast.agent === "cursor" ? forecast.quotaData?.latest?.cursorUsageBreakdown : null;
-  const cursorDetails = cursorBreakdown
-    ? ` · Auto + Composer ${Number(cursorBreakdown.autoPercentUsed || 0).toFixed(0)}% · API ${Number(cursorBreakdown.apiPercentUsed || 0).toFixed(0)}%`
+  const quotaDetails = Array.isArray(forecast.quotaData?.latest?.quotaBreakdown)
+    ? forecast.quotaData.latest.quotaBreakdown
+        .filter((entry) => entry?.label !== account.label && Number.isFinite(Number(entry?.usedPercent)))
+        .map((entry) => `${entry.label} ${Number(entry.usedPercent).toFixed(0)}%`)
+        .join(" · ")
     : "";
-  dates.innerHTML = `<span>${escapeHtml(`${account.label}${cursorDetails}`)}</span><span>重置 ${escapeHtml(formatAccountTime(account.resetAt))}</span>`;
+  dates.innerHTML = `<span>${escapeHtml(`${account.label}${quotaDetails ? ` · ${quotaDetails}` : ""}`)}</span><span>重置 ${escapeHtml(formatAccountTime(account.resetAt))}</span>`;
   els.forecastRunway.appendChild(dates);
 
   if (account.type === "percent" && fit?.model) {
@@ -727,12 +798,9 @@ function renderAccountRunway(forecast) {
     const intervalCount = fit?.intervalCount || 0;
     const requiredIntervals = fit?.requiredIntervals || 2;
     const currentPoints = fit?.currentSegmentPoints || fit?.sampleCount || 0;
-    const message = forecast.agent === "cursor"
-      ? "主进度使用 Cursor 设置页的 Included in Pro 总百分比；Auto + Composer 与 API 单独保留。已收集"
-      : "已收集";
-    els.forecastAdvice.innerHTML = `<strong>官方额度已同步。</strong><span>${message} ${intervalCount} / ${requiredIntervals} 个跨周期有效区间，当前周期 ${currentPoints} 个观测点；达到 ${requiredIntervals} 个有效区间后启用原始 Token 拟合。额度重置只开启新分段，历史样本会继续参与并随时间衰减。${escapeHtml(modelFitStatus(forecast.modelFit))}。</span>`;
+    els.forecastAdvice.innerHTML = `<strong>官方额度已同步。</strong><span>已收集 ${intervalCount} / ${requiredIntervals} 个跨周期有效区间，当前周期 ${currentPoints} 个观测点；达到 ${requiredIntervals} 个有效区间后启用原始 Token 拟合。额度重置只开启新分段，历史样本会继续参与并随时间衰减。${escapeHtml(modelFitStatus(forecast.modelFit))}。</span>`;
   } else {
-    els.forecastAdvice.innerHTML = `<strong>Cursor 账期已同步。</strong><span>账户计划单位与 token 不是已确认的一对一口径；保留原始已用、剩余和账期，待 Cursor 每日事件数据积累后再启用拟合。</span>`;
+    els.forecastAdvice.innerHTML = `<strong>账户账期已同步。</strong><span>账户计划单位与 token 不是已确认的一对一口径；保留原始已用、剩余和账期，待每日事件数据积累后再启用拟合。</span>`;
   }
 }
 
@@ -747,7 +815,7 @@ function renderForecastRunway(forecast) {
   els.forecastPeriodPill.textContent = "等待自动同步";
   els.forecastRunway.appendChild(emptyState("刷新后将自动读取账户额度与重置时间"));
   const advice = document.createElement("div");
-  advice.innerHTML = "<strong>尚未取得账户额度快照。</strong><span>点击页面右上角刷新会同时同步 Codex、Claude Code 与 Cursor；本地 Token 速率仍会继续记录。</span>";
+  advice.innerHTML = "<strong>尚未取得账户额度快照。</strong><span>点击页面右上角刷新会同步全部已注册来源；本地 Token 速率仍会继续记录。</span>";
   els.forecastAdvice.appendChild(advice);
 }
 
@@ -842,10 +910,13 @@ function renderForecast(agent = forecastAgent) {
 }
 
 function setForecastAgent(agent) {
-  forecastAgent = FORECAST_AGENT_META[agent] ? agent : "codex";
-  els.forecastAgentTabs.forEach((tab) => {
+  const fallback = providerCatalog.find((entry) => entry.forecast !== false)?.id;
+  forecastAgent = FORECAST_AGENT_META[agent] ? agent : fallback;
+  forecastTabElements().forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.forecastAgent === forecastAgent);
+    tab.setAttribute("aria-selected", String(tab.dataset.forecastAgent === forecastAgent));
   });
+  if (!forecastAgent) return;
   const snapshot = forecastSnapshots[forecastAgent];
   els.sourcePath.textContent = snapshot?.latestFile ? snapshot.latestFile.path : snapshot?.logDir || `usage-logs/${forecastAgent}/daily`;
   renderForecast(forecastAgent);
@@ -1040,7 +1111,7 @@ function renderMetrics(days, totals, view, bundle = {}) {
     renderMetric("今日总用量", formatCompact(latestTotal), `${dayDate(latest)} · ${formatCost(dayCost(latest))}`);
     renderMetric("累计 Token", formatCompact(totalTokenCount), `最近 30 条记录 ${formatCompact(recentTotal)}`);
     renderMetric("近 30 日费用", formatCost(recentCost), `累计估算 ${formatCost(totalCost)}`);
-    renderMetric("活跃来源", `${sourceCount || activeAgentCount(days)} 个`, "Codex / Claude Code / Cursor 本地数据");
+    renderMetric("活跃来源", `${sourceCount || activeAgentCount(days)} 个`, providerCatalog.map((entry) => entry.shortLabel || entry.label).join(" / "));
     return;
   }
 
@@ -1341,22 +1412,76 @@ function sourceSummary(snapshot) {
   return { days, latest, total, cost, recent };
 }
 
+function dayModels(day) {
+  if (day?.models && typeof day.models === "object" && !Array.isArray(day.models)) {
+    return Object.entries(day.models).map(([name, usage]) => ({ modelName: name, ...usage }));
+  }
+  return Array.isArray(day?.modelBreakdowns) ? day.modelBreakdowns : [];
+}
+
+function mergeUsageSnapshots(bundle) {
+  const byDay = new Map();
+  const files = [];
+  for (const provider of providerCatalog) {
+    const snapshot = bundle[provider.id] || {};
+    for (const file of snapshot.files || []) files.push({ ...file, name: `${provider.shortLabel || provider.label} · ${file.name}` });
+    for (const sourceDay of snapshot.daily || []) {
+      const date = dayKey(sourceDay) || dayDate(sourceDay);
+      if (!date || date === "--") continue;
+      const day = byDay.get(date) || {
+        date,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 0,
+        totalCost: 0,
+        modelBreakdowns: [],
+      };
+      for (const field of ["inputTokens", "outputTokens", "cacheReadTokens", "cacheCreationTokens", "reasoningOutputTokens", "totalTokens"]) {
+        day[field] += Number(sourceDay[field]) || 0;
+      }
+      day.totalCost += dayCost(sourceDay);
+      for (const model of dayModels(sourceDay)) {
+        day.modelBreakdowns.push({
+          ...model,
+          modelName: `${provider.shortLabel || provider.label} · ${model.modelName || model.name || "unknown"}`,
+        });
+      }
+      byDay.set(date, day);
+    }
+  }
+  const daily = [...byDay.values()].sort((a, b) => parseCcDate(a.date) - parseCcDate(b.date));
+  const totals = daily.reduce((sum, day) => {
+    for (const field of ["inputTokens", "outputTokens", "cacheReadTokens", "cacheCreationTokens", "reasoningOutputTokens", "totalTokens", "totalCost"]) {
+      sum[field] += Number(day[field]) || 0;
+    }
+    return sum;
+  }, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, totalCost: 0 });
+  const latestFiles = providerCatalog.map((provider) => bundle[provider.id]?.latestFile).filter(Boolean);
+  return {
+    source: "overview",
+    label: "全部智能体",
+    logDir: "usage-logs/{provider}/daily",
+    latestFile: latestFiles.length ? { name: `${latestFiles.length} 个来源`, path: "后端 Provider 注册表动态聚合" } : null,
+    files: files.sort((a, b) => new Date(b.modifiedAt || 0) - new Date(a.modifiedAt || 0)),
+    daily,
+    totals,
+  };
+}
+
 function renderOverviewSources(bundle) {
   els.sourceCompare.replaceChildren();
-  const cards = [
-    { key: "codex", label: "Codex", tone: "codex" },
-    { key: "claude", label: "Claude Code", tone: "claude" },
-    { key: "cursor", label: "Cursor", tone: "cursor" },
-  ];
-
-  cards.forEach((card) => {
-    const snapshot = bundle[card.key];
+  providerCatalog.forEach((provider) => {
+    const snapshot = bundle[provider.id];
     const summary = sourceSummary(snapshot);
     const node = document.createElement("article");
-    node.className = `source-card ${card.tone}`;
+    node.className = `source-card ${provider.tone || ""}`;
+    node.style.setProperty("--provider-color", provider.color || "var(--rust)");
     node.innerHTML = `
       <div>
-        <p class="section-label">${escapeHtml(card.label)}</p>
+        <p class="section-label">${escapeHtml(provider.label)}</p>
         <h3>${summary.latest ? formatCompact(summary.total) : "--"}</h3>
         <p>${summary.latest ? `${dayDate(summary.latest)} 最新 ${formatCompact(summary.latest.totalTokens)}` : "还没有本地快照"}</p>
       </div>
@@ -1421,7 +1546,7 @@ function setViewVisibility(view) {
   const isSources = view === "sources";
   const isForecast = view === "forecast";
   const isUsageView = !isSources && !isForecast;
-  const showReset = view === "overview" || view === "codex";
+  const showReset = view === "overview" || Boolean(providerMeta[view]?.resetCredits);
   els.forecastView.classList.toggle("is-hidden", !isForecast);
   els.metricGrid.classList.toggle("is-hidden", isForecast);
   els.sourceCompare.classList.toggle("is-hidden", !(view === "overview" || isSources));
@@ -1432,7 +1557,7 @@ function setViewVisibility(view) {
 }
 
 function setActiveTab(view) {
-  els.viewTabs.forEach((tab) => {
+  viewTabElements().forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.view === view);
   });
 }
@@ -1456,9 +1581,9 @@ async function loadSourcesView() {
   const data = await response.json();
   const sources = data.sources || [];
   const ready = sources.filter((source) => source.latestFile).length;
-  els.sourcePath.textContent = "usage-logs/{codex,claude,cursor,all}/daily";
+  els.sourcePath.textContent = "usage-logs/{provider}/daily";
   els.metricGrid.replaceChildren();
-  renderMetric("数据源", `${sources.length} 个`, "Codex / Claude Code / Cursor / All");
+  renderMetric("数据源", `${sources.length} 个`, `${providerCatalog.length} 个智能体 + 聚合来源`);
   renderMetric("已有快照", `${ready} 个`, "至少导出一次后显示");
   renderMetric("计划任务", "12:00", "默认每天中午导出");
   renderMetric("存储位置", "项目内", "同一天刷新覆盖同名 JSON");
@@ -1468,16 +1593,13 @@ async function loadSourcesView() {
 
 async function loadForecastView() {
   setStatus("正在读取用量与账户额度...");
-  const [codex, claude, cursor, codexQuota, claudeQuota, cursorQuota] = await Promise.all([
-    fetchUsage("codex"),
-    fetchUsage("claude"),
-    fetchUsage("cursor"),
-    fetchQuota("codex"),
-    fetchQuota("claude"),
-    fetchQuota("cursor"),
-  ]);
-  forecastSnapshots = { codex, claude, cursor };
-  forecastQuotas = { codex: codexQuota, claude: claudeQuota, cursor: cursorQuota };
+  const forecastProviders = providerCatalog.filter((entry) => entry.forecast !== false);
+  const results = await Promise.all(forecastProviders.map(async (provider) => {
+    const [usage, quota] = await Promise.all([fetchUsage(provider.id), fetchQuota(provider.id)]);
+    return [provider.id, usage, quota];
+  }));
+  forecastSnapshots = Object.fromEntries(results.map(([id, usage]) => [id, usage]));
+  forecastQuotas = Object.fromEntries(results.map(([id, , quota]) => [id, quota]));
   setForecastAgent(forecastAgent);
   const ready = Object.values(forecastSnapshots).filter((snapshot) => snapshot?.latestFile).length;
   const quotaReady = Object.values(forecastQuotas).filter((quota) => quota?.latest).length;
@@ -1504,14 +1626,11 @@ async function loadView(view = currentView) {
     setStatus(`正在读取 ${config.label} JSON...`);
 
     if (currentView === "overview") {
-      const [all, codex, claude, cursor] = await Promise.all([
-        fetchUsage("all"),
-        fetchUsage("codex"),
-        fetchUsage("claude"),
-        fetchUsage("cursor"),
-      ]);
-      renderUsage(all, "overview", { codex, claude, cursor });
-      setStatus(all.latestFile ? `已读取总览 ${all.latestFile.name}` : "未发现总览导出文件", all.latestFile ? "ok" : "loading");
+      const entries = await Promise.all(providerCatalog.map(async (provider) => [provider.id, await fetchUsage(provider.id)]));
+      const bundle = Object.fromEntries(entries);
+      const overview = mergeUsageSnapshots(bundle);
+      renderUsage(overview, "overview", bundle);
+      setStatus(overview.latestFile ? `已聚合 ${overview.latestFile.name}` : "未发现智能体快照", overview.latestFile ? "ok" : "loading");
       return;
     }
 
@@ -1568,23 +1687,34 @@ async function exportAndRefresh(scope = "current") {
   }
 }
 
-els.viewTabs.forEach((tab) => {
-  tab.addEventListener("click", () => {
-    const view = tab.dataset.view || "overview";
-    history.replaceState(null, "", `#${view}`);
-    loadView(view);
-  });
+els.viewTabs.addEventListener("click", (event) => {
+  const tab = event.target.closest(".view-tab");
+  if (!tab) return;
+  const view = tab.dataset.view || "overview";
+  history.replaceState(null, "", `#${view}`);
+  loadView(view);
 });
 
-els.forecastAgentTabs.forEach((tab) => {
-  tab.addEventListener("click", () => {
-    setForecastAgent(tab.dataset.forecastAgent || "codex");
-  });
+els.forecastAgentTabs.addEventListener("click", (event) => {
+  const tab = event.target.closest(".forecast-agent-tab");
+  if (!tab) return;
+  setForecastAgent(tab.dataset.forecastAgent);
 });
 
 els.refreshBtn.addEventListener("click", () => exportAndRefresh("everything"));
 els.exportBtn.addEventListener("click", () => exportAndRefresh("everything"));
+els.updateClose.addEventListener("click", () => hideUpdateBanner({ remember: true }));
 
-const initialView = location.hash.replace("#", "") || "overview";
-loadView(initialView);
-loadResetCredits();
+async function bootstrap() {
+  loadUpdateStatus();
+  try {
+    await loadProviderCatalog();
+    const initialView = location.hash.replace("#", "") || "overview";
+    await loadView(initialView);
+    await loadResetCredits();
+  } catch (error) {
+    setStatus(`初始化失败：${error.message}`, "error");
+  }
+}
+
+bootstrap();

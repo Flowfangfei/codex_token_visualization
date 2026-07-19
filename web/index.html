@@ -32,11 +32,23 @@
         <nav class="view-tabs" aria-label="页面视图">
           <button class="view-tab is-active" type="button" data-view="overview">总览</button>
           <button class="view-tab" type="button" data-view="forecast">额度预测</button>
-          <button class="view-tab" type="button" data-view="codex">Codex</button>
-          <button class="view-tab" type="button" data-view="claude">Claude Code</button>
-          <button class="view-tab" type="button" data-view="cursor">Cursor</button>
+          <span class="provider-tab-fragment" id="providerViewTabs"></span>
           <button class="view-tab" type="button" data-view="sources">数据源</button>
         </nav>
+
+        <aside class="update-banner is-hidden" id="updateBanner" aria-live="polite">
+          <div class="update-copy">
+            <span class="update-mark" aria-hidden="true">↑</span>
+            <div>
+              <strong>发现新版本</strong>
+              <span id="updateText"></span>
+            </div>
+          </div>
+          <div class="update-actions">
+            <a class="update-link" id="updateLink" href="#" target="_blank" rel="noopener noreferrer">查看更新</a>
+            <button class="update-close" id="updateClose" type="button" title="关闭此版本提示" aria-label="关闭此版本提示">×</button>
+          </div>
+        </aside>
 
         <section class="status-strip" aria-live="polite">
           <div>
@@ -52,11 +64,7 @@
               <p class="section-label">Runway planner</p>
               <h2>额度预测</h2>
             </div>
-            <div class="forecast-agent-tabs" id="forecastAgentTabs" role="tablist" aria-label="额度来源">
-              <button class="forecast-agent-tab is-active" type="button" data-forecast-agent="codex" role="tab">Codex</button>
-              <button class="forecast-agent-tab" type="button" data-forecast-agent="claude" role="tab">Claude Code</button>
-              <button class="forecast-agent-tab" type="button" data-forecast-agent="cursor" role="tab">Cursor</button>
-            </div>
+            <div class="forecast-agent-tabs" id="forecastAgentTabs" role="tablist" aria-label="额度来源"></div>
           </div>
 
           <section class="forecast-metric-grid" id="forecastMetricGrid"></section>

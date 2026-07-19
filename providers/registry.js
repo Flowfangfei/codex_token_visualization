@@ -1,0 +1,155 @@
+const os = require("node:os");
+const path = require("node:path");
+
+const ROOT = path.resolve(__dirname, "..");
+const USAGE_ROOT = process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs");
+const APP_DATA = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+
+function usageDirectory(id, envName) {
+  return process.env[envName] || path.join(USAGE_ROOT, id, "daily");
+}
+
+function provider(definition) {
+  return Object.freeze({
+    navigation: true,
+    forecast: true,
+    resetCredits: false,
+    ...definition,
+  });
+}
+
+const PROVIDERS = Object.freeze([
+  provider({
+    id: "codex",
+    label: "Codex",
+    shortLabel: "Codex",
+    tone: "codex",
+    color: "#9b4732",
+    planLabel: "ChatGPT Pro 5x",
+    subtitle: "Codex 本地 JSONL",
+    trendTitle: "Codex 最近使用量",
+    breakdownTitle: "Codex Token 构成",
+    resetCredits: true,
+    detectPaths: [process.env.CODEX_AUTH_PATH || path.join(os.homedir(), ".codex", "auth.json")],
+    usage: {
+      adapter: "ccusage",
+      filePrefix: "codex-usage",
+      ccusageArgs: ["codex", "daily"],
+      logRoot: usageDirectory("codex", "CODEX_USAGE_LOG_DIR"),
+      legacyRoots: [path.join(ROOT, "codex-usage-logs", "daily")],
+    },
+    quota: { adapter: "codex-app-server" },
+    sourceDescription: "ccusage codex daily + Codex app-server",
+  }),
+  provider({
+    id: "claude",
+    label: "Claude Code",
+    shortLabel: "Claude",
+    tone: "claude",
+    color: "#b36b37",
+    planLabel: "Claude Max 5x",
+    subtitle: "Claude Code 本地 JSONL",
+    trendTitle: "Claude Code 最近使用量",
+    breakdownTitle: "Claude Token 构成",
+    detectPaths: [path.join(os.homedir(), ".claude")],
+    usage: {
+      adapter: "ccusage",
+      filePrefix: "claude-usage",
+      ccusageArgs: ["claude", "daily"],
+      logRoot: usageDirectory("claude", "CLAUDE_USAGE_LOG_DIR"),
+    },
+    quota: { adapter: "claude-oauth" },
+    sourceDescription: "ccusage claude daily + Claude OAuth usage",
+  }),
+  provider({
+    id: "cursor",
+    label: "Cursor",
+    shortLabel: "Cursor",
+    tone: "cursor",
+    color: "#2f6970",
+    planLabel: "Cursor Pro",
+    subtitle: "Cursor 账户使用事件",
+    trendTitle: "Cursor 最近使用量",
+    breakdownTitle: "Cursor Token 构成",
+    detectPaths: [path.join(APP_DATA, "Cursor"), path.join(os.homedir(), ".cursor")],
+    usage: {
+      adapter: "cursor-events",
+      filePrefix: "cursor-usage",
+      logRoot: usageDirectory("cursor", "CURSOR_USAGE_LOG_DIR"),
+    },
+    quota: { adapter: "cursor-account" },
+    sourceDescription: "Cursor local account database + account usage APIs",
+  }),
+  provider({
+    id: "kimi",
+    label: "Kimi Code",
+    shortLabel: "Kimi",
+    tone: "kimi",
+    color: "#55784f",
+    planLabel: "Kimi Code",
+    subtitle: "Kimi Code 本地 wire 日志",
+    trendTitle: "Kimi Code 最近使用量",
+    breakdownTitle: "Kimi Token 构成",
+    detectPaths: [process.env.KIMI_CODE_HOME || path.join(os.homedir(), ".kimi-code")],
+    usage: {
+      adapter: "kimi-wire",
+      filePrefix: "kimi-usage",
+      logRoot: usageDirectory("kimi", "KIMI_USAGE_LOG_DIR"),
+    },
+    quota: { adapter: "kimi-managed-usage" },
+    sourceDescription: "Kimi Code wire logs + managed usage API",
+  }),
+]);
+
+const AGGREGATE_PROVIDER = provider({
+  id: "all",
+  label: "All Agents",
+  shortLabel: "All",
+  tone: "all",
+  color: "#2d2822",
+  planLabel: null,
+  subtitle: "ccusage 聚合快照",
+  navigation: false,
+  forecast: false,
+  usage: {
+    adapter: "ccusage",
+    filePrefix: "all-usage",
+    ccusageArgs: ["daily"],
+    logRoot: usageDirectory("all", "ALL_USAGE_LOG_DIR"),
+  },
+  quota: null,
+  sourceDescription: "ccusage daily aggregate",
+});
+
+const ALL_SOURCES = Object.freeze([...PROVIDERS, AGGREGATE_PROVIDER]);
+
+function getProvider(id, { includeAggregate = true } = {}) {
+  const candidates = includeAggregate ? ALL_SOURCES : PROVIDERS;
+  return candidates.find((entry) => entry.id === id) || null;
+}
+
+function publicProvider(entry) {
+  return {
+    id: entry.id,
+    label: entry.label,
+    shortLabel: entry.shortLabel,
+    tone: entry.tone,
+    color: entry.color,
+    navigation: entry.navigation,
+    forecast: entry.forecast,
+    resetCredits: entry.resetCredits,
+    subtitle: entry.subtitle,
+    trendTitle: entry.trendTitle || "最近使用量",
+    breakdownTitle: entry.breakdownTitle || "Token 构成",
+  };
+}
+
+module.exports = {
+  ROOT,
+  USAGE_ROOT,
+  PROVIDERS,
+  AGGREGATE_PROVIDER,
+  ALL_SOURCES,
+  getProvider,
+  publicProvider,
+};

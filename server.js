@@ -3,6 +3,12 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const {
+  PROVIDERS,
+  ALL_SOURCES,
+  publicProvider,
+} = require("./providers/registry.js");
+const { checkForUpdate } = require("./lib/update-check.js");
 
 const ROOT = __dirname;
 const WEB_ROOT = path.join(ROOT, "web");
@@ -12,49 +18,21 @@ const USAGE_LOG_ROOT = process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs
 const FORECAST_SETTINGS_PATH = process.env.FORECAST_SETTINGS_PATH || path.join(USAGE_LOG_ROOT, "forecast-settings.json");
 const QUOTA_SNAPSHOT_ROOT = process.env.QUOTA_SNAPSHOT_DIR || path.join(USAGE_LOG_ROOT, "quota-snapshots");
 const QUOTA_OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || path.join(USAGE_LOG_ROOT, "quota-observations");
-const FORECAST_AGENTS = ["codex", "claude", "cursor"];
-
-const SOURCE_CONFIGS = {
-  codex: {
-    label: "Codex",
-    filePrefix: "codex-usage",
-    command: ["codex", "daily"],
-    logRoot:
-      process.env.CODEX_USAGE_LOG_DIR ||
-      path.join(USAGE_LOG_ROOT, "codex", "daily"),
-    legacyRoots: [path.join(ROOT, "codex-usage-logs", "daily")],
-  },
-  claude: {
-    label: "Claude Code",
-    filePrefix: "claude-usage",
-    command: ["claude", "daily"],
-    logRoot:
-      process.env.CLAUDE_USAGE_LOG_DIR ||
-      path.join(USAGE_LOG_ROOT, "claude", "daily"),
-    detectPath: path.join(os.homedir(), ".claude"),
-  },
-  cursor: {
-    label: "Cursor",
-    filePrefix: "cursor-usage",
-    command: null,
-    logRoot: process.env.CURSOR_USAGE_LOG_DIR || path.join(USAGE_LOG_ROOT, "cursor", "daily"),
-    detectPaths: [
-      path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "Cursor"),
-      path.join(os.homedir(), ".cursor"),
-    ],
+const FORECAST_AGENTS = PROVIDERS.filter((entry) => entry.forecast && entry.quota).map((entry) => entry.id);
+const SOURCE_CONFIGS = Object.fromEntries(
+  ALL_SOURCES.map((entry) => [entry.id, {
+    label: entry.label,
+    filePrefix: entry.usage.filePrefix,
+    command: entry.usage.ccusageArgs || null,
+    adapter: entry.usage.adapter,
+    logRoot: entry.usage.logRoot,
+    legacyRoots: entry.usage.legacyRoots || [],
+    detectPaths: entry.detectPaths || [],
+    sourceDescription: entry.sourceDescription,
     manualOnly: false,
-  },
-  all: {
-    label: "All Agents",
-    filePrefix: "all-usage",
-    command: ["daily"],
-    logRoot:
-      process.env.ALL_USAGE_LOG_DIR ||
-      path.join(USAGE_LOG_ROOT, "all", "daily"),
-  },
-};
-
-const EXPORT_SEQUENCE = ["codex", "claude", "all"];
+  }])
+);
+const EXPORT_SEQUENCE = ALL_SOURCES.filter((entry) => entry.usage.adapter === "ccusage").map((entry) => entry.id);
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -77,8 +55,9 @@ function validDate(value) {
 }
 
 function defaultForecastAgent(agent) {
+  const provider = PROVIDERS.find((entry) => entry.id === agent);
   return {
-    subscriptionPlan: agent === "codex" ? "ChatGPT Pro 5x" : agent === "claude" ? "Claude Max 5x" : "Cursor Pro",
+    subscriptionPlan: provider?.planLabel || provider?.label || agent,
     accountSyncEnabled: true,
     budgetTokens: null,
     periodEndsOn: null,
@@ -541,8 +520,21 @@ function runExport(req, res) {
     exportEverything()
       .then(async (result) => {
         const quotaSync = await refreshAccountSnapshots();
-        const allFailed = result.results.every((item) => !item.ok);
-        sendJson(res, allFailed ? 500 : 200, { ...result, quotaSync });
+        const quotaResults = (quotaSync.results || []).map((item) => ({
+          ...item,
+          source: `quota:${item.source}`,
+        }));
+        const combinedResults = [...result.results, ...quotaResults];
+        const succeeded = combinedResults.filter((item) => item.ok).length;
+        const ok = combinedResults.length > 0 && succeeded === combinedResults.length;
+        const partial = succeeded > 0 && succeeded < combinedResults.length;
+        sendJson(res, succeeded === 0 ? 500 : 200, {
+          ...result,
+          ok,
+          partial,
+          results: combinedResults,
+          quotaSync,
+        });
       })
       .catch((error) => {
         sendJson(res, 500, { ok: false, error: error.message });
@@ -579,27 +571,21 @@ function sourceStatus() {
   return Object.entries(SOURCE_CONFIGS).map(([source, config]) => {
     const snapshot = latestUsageSnapshot(source);
     const quota = FORECAST_AGENTS.includes(source) ? quotaSnapshots(source) : null;
-    const detected = config.detectPaths
-      ? config.detectPaths.some((detectPath) => fs.existsSync(detectPath))
-      : source === "claude"
-        ? fs.existsSync(config.detectPath)
-        : source === "codex"
-          ? fs.existsSync(CODEX_AUTH_PATH)
-          : true;
+    const detected = config.detectPaths.length === 0 || config.detectPaths.some((detectPath) => fs.existsSync(detectPath));
 
     return {
       source,
       label: config.label,
-        command: config.command ? `ccusage ${config.command.join(" ")} --json` : "Cursor 账户与 usage events 自动同步",
+      command: config.sourceDescription,
       logDir: snapshot.logDir,
       primaryLogDir: snapshot.primaryLogDir,
       fileCount: snapshot.files.length,
       latestFile: snapshot.latestFile,
       dailyCount: snapshot.daily.length,
-        quotaLatest: quota?.latest || null,
-        quotaSnapshotCount: quota?.daily.length || 0,
-        quotaObservationCount: quota?.observations.length || 0,
-        detected,
+      quotaLatest: quota?.latest || null,
+      quotaSnapshotCount: quota?.daily.length || 0,
+      quotaObservationCount: quota?.observations.length || 0,
+      detected,
       manualOnly: Boolean(config.manualOnly),
     };
   });
@@ -635,6 +621,16 @@ function serveStatic(req, res) {
 
 const server = http.createServer((req, res) => {
   try {
+    if (req.method === "GET" && req.url.startsWith("/api/providers")) {
+      sendJson(res, 200, { ok: true, providers: PROVIDERS.map(publicProvider) });
+      return;
+    }
+
+    if (req.method === "GET" && req.url.startsWith("/api/update-status")) {
+      checkForUpdate(ROOT).then((payload) => sendJson(res, 200, { ok: true, ...payload }));
+      return;
+    }
+
     if (req.method === "GET" && req.url.startsWith("/api/usage")) {
       const source = sourceFromUrl(req, "codex");
       if (!source) {
@@ -712,8 +708,7 @@ const server = http.createServer((req, res) => {
 const port = parseArgs();
 server.listen(port, () => {
   console.log(`AI token dashboard: http://localhost:${port}`);
-  console.log(`Codex logs: ${SOURCE_CONFIGS.codex.logRoot}`);
-  console.log(`Claude logs: ${SOURCE_CONFIGS.claude.logRoot}`);
-  console.log(`Cursor logs: ${SOURCE_CONFIGS.cursor.logRoot}`);
-  console.log(`All-agent logs: ${SOURCE_CONFIGS.all.logRoot}`);
+  for (const source of ALL_SOURCES) {
+    console.log(`${source.label} logs: ${SOURCE_CONFIGS[source.id].logRoot}`);
+  }
 });

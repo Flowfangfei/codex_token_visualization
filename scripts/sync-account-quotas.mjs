@@ -1,16 +1,20 @@
 import { spawn } from "node:child_process";
-import { readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { arch, homedir, hostname, release, type } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import providerRegistry from "../providers/registry.js";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const USAGE_ROOT = process.env.USAGE_LOG_ROOT || join(ROOT, "usage-logs");
 const SETTINGS_PATH = process.env.FORECAST_SETTINGS_PATH || join(USAGE_ROOT, "forecast-settings.json");
 const QUOTA_ROOT = process.env.QUOTA_SNAPSHOT_DIR || join(USAGE_ROOT, "quota-snapshots");
 const OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || join(USAGE_ROOT, "quota-observations");
-const SOURCES = ["codex", "claude", "cursor"];
+const PROVIDERS = providerRegistry.PROVIDERS;
+const PROVIDER_BY_ID = new Map(PROVIDERS.map((entry) => [entry.id, entry]));
+const SOURCES = PROVIDERS.filter((entry) => entry.forecast && entry.quota).map((entry) => entry.id);
 
 function localDateKey(date = new Date()) {
   const pad = (value) => String(value).padStart(2, "0");
@@ -295,6 +299,10 @@ async function fetchCursorQuota(credentials) {
       apiPercentUsed: clampPercent(plan.apiPercentUsed),
       totalPercentUsed: clampPercent(plan.totalPercentUsed),
     },
+    quotaBreakdown: [
+      { label: "Auto + Composer", usedPercent: clampPercent(plan.autoPercentUsed) },
+      { label: "API", usedPercent: clampPercent(plan.apiPercentUsed) },
+    ],
   };
 }
 
@@ -439,23 +447,313 @@ async function fetchCursorUsageEvents(credentials) {
   };
 }
 
-function writeCursorUsageSnapshot(snapshot) {
-  const logDir = join(USAGE_ROOT, "cursor", "daily");
-  const filePath = join(logDir, `cursor-usage-${localDateKey()}.json`);
+function kimiCodeHome() {
+  return process.env.KIMI_CODE_HOME || join(homedir(), ".kimi-code");
+}
+
+function kimiCredentialPath() {
+  return process.env.KIMI_CODE_CREDENTIAL_PATH || join(kimiCodeHome(), "credentials", "kimi-code.json");
+}
+
+function kimiDeviceHeaders() {
+  const deviceName = encodeURIComponent(hostname());
+  const deviceId = createHash("sha256").update(`${hostname()}\0${type()}\0${arch()}`).digest("hex").slice(0, 32);
+  return {
+    "X-Msh-Platform": "kimi_code_cli",
+    "X-Msh-Version": process.env.KIMI_CODE_VERSION || "0.27.0",
+    "X-Msh-Device-Name": deviceName,
+    "X-Msh-Device-Model": arch(),
+    "X-Msh-Os-Version": release(),
+    "X-Msh-Device-Id": process.env.KIMI_CODE_DEVICE_ID || deviceId,
+  };
+}
+
+function writeJsonAtomically(filePath, payload) {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  writeFileSync(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(temporaryPath, filePath);
+}
+
+async function refreshKimiCredential(credentials) {
+  if (typeof credentials?.refresh_token !== "string" || !credentials.refresh_token) {
+    throw new Error("Kimi Code refresh token was not found; run kimi login again");
+  }
+  const response = await fetch("https://auth.kimi.com/api/oauth/token", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      ...kimiDeviceHeaders(),
+    },
+    body: new URLSearchParams({
+      client_id: "17e5f671-d194-4dfb-9706-5516cb48c098",
+      grant_type: "refresh_token",
+      refresh_token: credentials.refresh_token,
+    }),
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!response.ok) throw new Error(`Kimi OAuth refresh returned HTTP ${response.status}`);
+  const payload = await response.json();
+  if (typeof payload?.access_token !== "string" || !payload.access_token) {
+    throw new Error("Kimi OAuth refresh did not return an access token");
+  }
+  const expiresIn = Number(payload.expires_in);
+  const refreshed = {
+    ...credentials,
+    ...payload,
+    refresh_token: payload.refresh_token || credentials.refresh_token,
+    expires_at: Number.isFinite(expiresIn) ? Math.floor(Date.now() / 1000) + expiresIn : credentials.expires_at,
+  };
+  writeJsonAtomically(kimiCredentialPath(), refreshed);
+  return refreshed;
+}
+
+async function kimiCredential(forceRefresh = false) {
+  const credentialPath = kimiCredentialPath();
+  if (!existsSync(credentialPath)) throw new Error("Kimi Code credentials were not found; run kimi login first");
+  const credentials = readJson(credentialPath);
+  const expiresAt = Number(credentials?.expires_at);
+  const expiresSoon = Number.isFinite(expiresAt) && expiresAt * 1000 <= Date.now() + 5 * 60 * 1000;
+  if (forceRefresh || expiresSoon || typeof credentials?.access_token !== "string" || !credentials.access_token) {
+    return refreshKimiCredential(credentials);
+  }
+  return credentials;
+}
+
+function kimiResetAt(row) {
+  const absolute = row?.reset_at ?? row?.resetAt ?? row?.reset_time ?? row?.resetTime;
+  if (absolute) {
+    const numeric = Number(absolute);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return new Date(numeric > 1e12 ? numeric : numeric * 1000).toISOString();
+    }
+    return toIso(absolute);
+  }
+  const relative = Number(row?.reset_in ?? row?.resetIn ?? row?.ttl ?? (typeof row?.window === "number" ? row.window : null));
+  return Number.isFinite(relative) && relative >= 0 ? new Date(Date.now() + relative * 1000).toISOString() : null;
+}
+
+function kimiWindowMinutes(row) {
+  const window = row?.window;
+  if (window && typeof window === "object") {
+    const duration = Number(window.duration ?? window.value ?? window.length);
+    const unit = String(window.unit ?? window.time_unit ?? window.timeUnit ?? "minute").toLowerCase();
+    if (Number.isFinite(duration) && duration > 0) {
+      if (unit.startsWith("day")) return duration * 1440;
+      if (unit.startsWith("hour")) return duration * 60;
+      if (unit.startsWith("week")) return duration * 10080;
+      if (unit.startsWith("second")) return duration / 60;
+      return duration;
+    }
+  }
+  const direct = Number(row?.window_duration_mins ?? row?.windowDurationMins);
+  return Number.isFinite(direct) && direct > 0 ? direct : null;
+}
+
+function kimiUsageRow(raw, fallbackName, fallbackLabel) {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw.detail && typeof raw.detail === "object" ? { ...raw, ...raw.detail } : raw;
+  const limit = Number(row.limit ?? row.total ?? row.quota);
+  let used = Number(row.used ?? row.consumed);
+  const remaining = Number(row.remaining ?? row.left);
+  if (!Number.isFinite(used) && Number.isFinite(limit) && Number.isFinite(remaining)) used = limit - remaining;
+  const explicitPercent = Number(row.used_percent ?? row.usedPercent ?? row.percent ?? row.percentage);
+  const usedPercent = clampPercent(Number.isFinite(explicitPercent)
+    ? explicitPercent
+    : Number.isFinite(limit) && limit > 0 && Number.isFinite(used)
+      ? (used / limit) * 100
+      : null);
+  if (usedPercent === null) return null;
+  const label = String(row.title ?? row.label ?? row.name ?? fallbackLabel);
+  const name = String(row.scope ?? row.name ?? fallbackName)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || fallbackName;
+  return {
+    name,
+    label,
+    usedPercent,
+    remainingPercent: 100 - usedPercent,
+    windowDurationMins: kimiWindowMinutes(row),
+    resetsAt: kimiResetAt(row),
+    limit: Number.isFinite(limit) ? limit : null,
+    used: Number.isFinite(used) ? used : null,
+    remaining: Number.isFinite(remaining) ? remaining : Number.isFinite(limit) && Number.isFinite(used) ? Math.max(0, limit - used) : null,
+  };
+}
+
+export function normalizeKimiUsagePayload(payload, fetchedAt = new Date().toISOString()) {
+  const rows = [];
+  const summary = kimiUsageRow(payload?.usage, "weekly_limit", "Weekly limit");
+  if (summary) rows.push({ ...summary, windowDurationMins: summary.windowDurationMins || 10080 });
+  const limits = Array.isArray(payload?.limits) ? payload.limits : [];
+  limits.forEach((entry, index) => {
+    const row = kimiUsageRow(entry, `limit_${index + 1}`, `Usage limit ${index + 1}`);
+    if (row) rows.push(row);
+  });
+  const deduplicated = [...new Map(rows.map((row) => [`${row.name}:${row.resetsAt || ""}:${row.windowDurationMins || ""}`, row])).values()];
+  if (!deduplicated.length) throw new Error("Kimi managed usage response did not include usage windows");
+  return {
+    source: "kimi",
+    fetchedAt,
+    provider: "kimi-code-managed-usage",
+    planType: typeof payload?.plan === "string" ? payload.plan : null,
+    windows: deduplicated,
+    quotaBreakdown: deduplicated.map((row) => ({ label: row.label, usedPercent: row.usedPercent })),
+  };
+}
+
+async function fetchKimiQuota() {
+  let credentials = await kimiCredential(false);
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await fetch("https://api.kimi.com/coding/v1/usages", {
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${credentials.access_token}`,
+          ...kimiDeviceHeaders(),
+        },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (response.status === 401 && attempt === 0) {
+        credentials.access_token = null;
+        credentials = await kimiCredential(true);
+        continue;
+      }
+      if (!response.ok) throw new Error(`Kimi managed usage endpoint returned HTTP ${response.status}`);
+      return normalizeKimiUsagePayload(await response.json());
+    }
+    throw new Error("Kimi managed usage credentials were rejected");
+  } finally {
+    if (credentials) {
+      credentials.access_token = null;
+      credentials.refresh_token = null;
+    }
+  }
+}
+
+function kimiWireFiles(root = join(kimiCodeHome(), "sessions")) {
+  if (!existsSync(root)) return [];
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const fullPath = join(directory, entry.name);
+      if (entry.isDirectory()) visit(fullPath);
+      else if (entry.isFile() && entry.name.toLowerCase() === "wire.jsonl") files.push(fullPath);
+    }
+  };
+  visit(root);
+  return files;
+}
+
+export function aggregateKimiUsageRecords(records, generatedAt = new Date().toISOString()) {
+  const byDay = new Map();
+  for (const record of records || []) {
+    if (record?.type !== "usage.record" || record?.usageScope !== "turn") continue;
+    const numericTime = Number(record.time);
+    const timestamp = Number.isFinite(numericTime)
+      ? new Date(numericTime >= 1e12 ? numericTime : numericTime * 1000)
+      : new Date(record.time);
+    if (Number.isNaN(timestamp.getTime())) continue;
+    const usage = record.usage || {};
+    const inputTokens = numberOrZero(usage.inputOther ?? usage.input_tokens);
+    const outputTokens = numberOrZero(usage.output ?? usage.output_tokens);
+    const cacheReadTokens = numberOrZero(usage.inputCacheRead ?? usage.cache_read_tokens);
+    const cacheCreationTokens = numberOrZero(usage.inputCacheCreation ?? usage.cache_creation_tokens);
+    const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
+    if (!totalTokens) continue;
+    const date = localDateKey(timestamp);
+    const modelName = String(record.model || "kimi-unknown");
+    const day = byDay.get(date) || {
+      date,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      totalTokens: 0,
+      totalCost: 0,
+      models: new Map(),
+    };
+    const model = day.models.get(modelName) || {
+      modelName,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      totalTokens: 0,
+      cost: 0,
+    };
+    for (const target of [day, model]) {
+      target.inputTokens += inputTokens;
+      target.outputTokens += outputTokens;
+      target.cacheCreationTokens += cacheCreationTokens;
+      target.cacheReadTokens += cacheReadTokens;
+      target.totalTokens += totalTokens;
+    }
+    day.models.set(modelName, model);
+    byDay.set(date, day);
+  }
+  const daily = [...byDay.values()]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((day) => ({
+      date: day.date,
+      inputTokens: day.inputTokens,
+      outputTokens: day.outputTokens,
+      cacheCreationTokens: day.cacheCreationTokens,
+      cacheReadTokens: day.cacheReadTokens,
+      totalTokens: day.totalTokens,
+      totalCost: 0,
+      modelsUsed: [...day.models.keys()],
+      modelBreakdowns: [...day.models.values()].sort((a, b) => b.totalTokens - a.totalTokens),
+    }));
+  const totals = daily.reduce((sum, day) => {
+    sum.inputTokens += day.inputTokens;
+    sum.outputTokens += day.outputTokens;
+    sum.cacheCreationTokens += day.cacheCreationTokens;
+    sum.cacheReadTokens += day.cacheReadTokens;
+    sum.totalTokens += day.totalTokens;
+    return sum;
+  }, { inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 0, totalTokens: 0, totalCost: 0 });
+  return { source: "kimi", generatedAt, provider: "kimi-code-wire", daily, totals };
+}
+
+function readKimiUsage() {
+  const records = [];
+  for (const filePath of kimiWireFiles()) {
+    const lines = readFileSync(filePath, "utf8").split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        records.push(JSON.parse(line));
+      } catch (_) {
+        // A partially written final line is ignored until the next refresh.
+      }
+    }
+  }
+  return aggregateKimiUsageRecords(records);
+}
+
+function writeManagedUsageSnapshot(source, snapshot) {
+  const provider = PROVIDER_BY_ID.get(source);
+  if (!provider) throw new Error(`Unknown usage source: ${source}`);
+  const logDir = provider.usage.logRoot;
+  const filePath = join(logDir, `${provider.usage.filePrefix}-${localDateKey()}.json`);
   mkdirSync(logDir, { recursive: true });
   writeFileSync(filePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
   return filePath;
 }
 
 function usageSnapshotPath(source) {
-  const prefixes = { codex: "codex-usage", claude: "claude-usage", cursor: "cursor-usage" };
-  const logDir = join(USAGE_ROOT, source, "daily");
+  const provider = PROVIDER_BY_ID.get(source);
+  if (!provider) return null;
+  const logDir = provider.usage.logRoot;
   if (!existsSync(logDir)) return null;
   const files = readdirSync(logDir)
     .filter((name) => name.toLowerCase().endsWith(".json"))
     .sort()
     .reverse();
-  const today = `${prefixes[source]}-${localDateKey()}.json`;
+  const today = `${provider.usage.filePrefix}-${localDateKey()}.json`;
   return join(logDir, files.includes(today) ? today : files[0] || "");
 }
 
@@ -677,17 +975,34 @@ function selectedSources() {
   return [requested];
 }
 
+const QUOTA_ADAPTERS = {
+  "codex-app-server": fetchCodexQuota,
+  "claude-oauth": fetchClaudeQuota,
+  "cursor-account": async () => {
+    const credentials = cursorCredentials();
+    try {
+      const [quota, usage] = await Promise.all([fetchCursorQuota(credentials), fetchCursorUsageEvents(credentials)]);
+      return { snapshot: quota, usage };
+    } finally {
+      credentials.accessToken = null;
+      credentials.userId = null;
+    }
+  },
+  "kimi-managed-usage": async () => {
+    const [snapshot, usage] = await Promise.all([fetchKimiQuota(), Promise.resolve().then(readKimiUsage)]);
+    return { snapshot, usage };
+  },
+};
+
 async function loadQuota(source) {
-  if (source === "codex") return fetchCodexQuota();
-  if (source === "claude") return fetchClaudeQuota();
-  const credentials = cursorCredentials();
-  try {
-    const [quota, usage] = await Promise.all([fetchCursorQuota(credentials), fetchCursorUsageEvents(credentials)]);
-    return { snapshot: quota, usage };
-  } finally {
-    credentials.accessToken = null;
-    credentials.userId = null;
-  }
+  const provider = PROVIDER_BY_ID.get(source);
+  const adapter = QUOTA_ADAPTERS[provider?.quota?.adapter];
+  if (!adapter) throw new Error(`No quota adapter is registered for ${source}`);
+  const loaded = await adapter(provider);
+  if (loaded?.snapshot) loaded.snapshot.source = provider.id;
+  else if (loaded) loaded.source = provider.id;
+  if (loaded?.usage) loaded.usage.source = provider.id;
+  return loaded;
 }
 
 async function main() {
@@ -703,7 +1018,7 @@ async function main() {
       const loaded = await loadQuota(source);
       const snapshot = loaded?.snapshot || loaded;
       const filePath = writeSnapshot(snapshot);
-      const usageFile = loaded?.usage ? writeCursorUsageSnapshot(loaded.usage) : null;
+      const usageFile = loaded?.usage ? writeManagedUsageSnapshot(source, loaded.usage) : null;
       const observation = writeQuotaObservation(snapshot, currentUsageAggregate(source, loaded?.usage));
       results.push({ source, ok: true, skipped: false, file: filePath, usageFile, observation, snapshot });
     } catch (error) {

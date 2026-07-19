@@ -1,5 +1,4 @@
 param(
-  [ValidateSet("codex", "claude", "all")]
   [string]$Source = "codex",
   [string]$Timezone = "Asia/Tokyo",
   [string]$OutputRoot,
@@ -9,11 +8,15 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-if (-not $OutputRoot) {
-  $OutputRoot = Join-Path $ProjectRoot (Join-Path "usage-logs" $Source)
+$ProviderConfigScript = Join-Path $PSScriptRoot "provider-config.mjs"
+$ConfigBase64 = & node $ProviderConfigScript --source $Source --base64
+if ($LASTEXITCODE -ne 0 -or -not $ConfigBase64) {
+  throw "No ccusage provider is registered for $Source"
 }
+$ConfigJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(($ConfigBase64 -join "")))
+$Config = $ConfigJson | ConvertFrom-Json
 
-$DailyRoot = Join-Path $OutputRoot "daily"
+$DailyRoot = if ($OutputRoot) { Join-Path $OutputRoot "daily" } else { [string]$Config.logRoot }
 $NpmCache = Join-Path $ProjectRoot ".npm-cache"
 
 New-Item -ItemType Directory -Force -Path $DailyRoot | Out-Null
@@ -37,30 +40,14 @@ if (-not $FileDate) {
   $FileDate = Get-Date -Format "yyyy-MM-dd"
 }
 
-$SourceConfig = @{
-  codex = @{
-    Prefix = "codex-usage"
-    Args = @("codex", "daily")
-  }
-  claude = @{
-    Prefix = "claude-usage"
-    Args = @("claude", "daily")
-  }
-  all = @{
-    Prefix = "all-usage"
-    Args = @("daily")
-  }
-}
-
-$Config = $SourceConfig[$Source]
-$OutputFile = Join-Path $DailyRoot "$($Config.Prefix)-$FileDate.json"
+$OutputFile = Join-Path $DailyRoot "$($Config.filePrefix)-$FileDate.json"
 $env:npm_config_cache = $NpmCache
 
 $npxArgs = @(
   "--cache", $NpmCache,
   "-y",
   "ccusage@latest"
-) + $Config.Args + @(
+) + @($Config.ccusageArgs) + @(
   "--timezone", $Timezone,
   "--json"
 )
@@ -68,7 +55,7 @@ $npxArgs = @(
 Write-Host "Exporting $Source usage to: $OutputFile"
 Write-Host "Timezone: $Timezone"
 Write-Host "npm cache: $NpmCache"
-Write-Host "Command: npx --cache `"$NpmCache`" -y ccusage@latest $($Config.Args -join ' ') --timezone $Timezone --json"
+Write-Host "Command: npx --cache `"$NpmCache`" -y ccusage@latest $(@($Config.ccusageArgs) -join ' ') --timezone $Timezone --json"
 
 $json = (& npx @npxArgs) -join [Environment]::NewLine
 if ($LASTEXITCODE -ne 0) {
