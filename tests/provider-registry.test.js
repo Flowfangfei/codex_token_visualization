@@ -125,6 +125,7 @@ test("Claude quota template keeps configured and newly discovered reset windows"
   const { applyQuotaWindowTemplate, normalizeClaudeUsagePayload } = await import("../scripts/sync-account-quotas.mjs");
   const quota = {
     discoverWindows: true,
+    minimumForecastWindowMins: 10080,
     windows: [
       { name: "five_hour", label: "5 小时额度", windowDurationMins: 300 },
       { name: "seven_day_fable", label: "Fable 周额度", windowDurationMins: 10080, modelPatterns: ["fable"] },
@@ -139,7 +140,9 @@ test("Claude quota template keeps configured and newly discovered reset windows"
   const snapshot = applyQuotaWindowTemplate({ quota }, { windows });
 
   assert.deepEqual(snapshot.windows.map((window) => window.name), ["five_hour", "seven_day_fable", "future_model_window"]);
+  assert.equal(snapshot.windows[0].selectable, false);
   assert.equal(snapshot.windows[1].label, "Fable 周额度");
+  assert.notEqual(snapshot.windows[1].selectable, false);
   assert.deepEqual(snapshot.windows[1].modelPatterns, ["fable"]);
   assert.equal(snapshot.windows[2].usedPercent, 12);
   assert.equal(JSON.stringify(snapshot).includes("modelPatterns"), false);

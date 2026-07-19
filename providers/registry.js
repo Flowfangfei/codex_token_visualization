@@ -41,6 +41,7 @@ const PROVIDERS = Object.freeze([
     quota: {
       adapter: "codex-app-server",
       discoverWindows: true,
+      minimumForecastWindowMins: 10080,
       windows: [
         { name: "primary", label: "主要额度" },
         { name: "secondary", label: "次要额度" },
@@ -68,6 +69,7 @@ const PROVIDERS = Object.freeze([
     quota: {
       adapter: "claude-oauth",
       discoverWindows: true,
+      minimumForecastWindowMins: 10080,
       windows: [
         { name: "five_hour", label: "5 小时额度", windowDurationMins: 300, windowKind: "rolling" },
         { name: "seven_day", label: "周总额度", windowDurationMins: 10080, windowKind: "weekly" },
@@ -97,6 +99,7 @@ const PROVIDERS = Object.freeze([
     quota: {
       adapter: "cursor-account",
       discoverWindows: true,
+      minimumForecastWindowMins: 10080,
       windows: [
         { name: "included_pro_total", label: "Included in Pro", windowKind: "billing" },
         { name: "auto_composer", label: "Auto + Composer", windowKind: "breakdown", selectable: false },
@@ -128,6 +131,7 @@ const PROVIDERS = Object.freeze([
     quota: {
       adapter: "kimi-managed-usage",
       discoverWindows: true,
+      minimumForecastWindowMins: 10080,
       windows: [
         { name: "monthly_membership", label: "月度总额", windowDurationMins: 43200, windowKind: "monthly" },
         { name: "weekly_limit", label: "Kimi Code 周额度", windowDurationMins: 10080, windowKind: "weekly" },

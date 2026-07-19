@@ -257,6 +257,7 @@ function humanizeQuotaWindowName(name) {
 
 export function applyQuotaWindowTemplate(provider, snapshot) {
   if (!snapshot || !Array.isArray(snapshot.windows)) return snapshot;
+  const minimumForecastWindowMins = Number(provider?.quota?.minimumForecastWindowMins) || 0;
   const definitions = new Map(
     (Array.isArray(provider?.quota?.windows) ? provider.quota.windows : [])
       .filter((definition) => definition?.name)
@@ -270,7 +271,16 @@ export function applyQuotaWindowTemplate(provider, snapshot) {
       windowDurationMins: Number(window.windowDurationMins) || Number(definition?.windowDurationMins) || null,
       windowKind: window.windowKind || definition?.windowKind || null,
     };
-    if (definition?.selectable === false) normalized.selectable = false;
+    if (definition?.selectable === false) {
+      normalized.selectable = false;
+    } else if (
+      definition?.selectable !== true &&
+      minimumForecastWindowMins > 0 &&
+      Number.isFinite(Number(normalized.windowDurationMins)) &&
+      Number(normalized.windowDurationMins) < minimumForecastWindowMins
+    ) {
+      normalized.selectable = false;
+    }
     if (Array.isArray(definition?.modelPatterns) && definition.modelPatterns.length) {
       Object.defineProperty(normalized, "modelPatterns", {
         value: definition.modelPatterns.map(String),
