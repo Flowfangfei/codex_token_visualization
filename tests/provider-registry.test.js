@@ -38,6 +38,34 @@ test("Kimi wire records aggregate only turn-scoped token events", async () => {
   assert.equal(snapshot.daily[0].modelBreakdowns[0].modelName, "kimi-code/k3");
 });
 
+test("Kimi CLI and desktop records merge without double-counting copied events", async () => {
+  const { mergeKimiUsageSourceRecords } = await import("../scripts/sync-account-quotas.mjs");
+  const shared = {
+    type: "usage.record",
+    time: new Date(2026, 6, 19, 10, 0).getTime(),
+    model: "k3-agent",
+    usageScope: "turn",
+    usage: { inputOther: 100, output: 20, inputCacheRead: 300, inputCacheCreation: 10 },
+  };
+  const desktopOnly = {
+    ...shared,
+    time: new Date(2026, 6, 19, 10, 1).getTime(),
+    usage: { inputOther: 200, output: 30, inputCacheRead: 400, inputCacheCreation: 0 },
+  };
+  const snapshot = mergeKimiUsageSourceRecords([
+    { id: "kimi-code-cli", wireFiles: 1, records: [shared] },
+    { id: "kimi-desktop", wireFiles: 2, records: [shared, desktopOnly] },
+  ], "2026-07-19T02:00:00.000Z");
+
+  assert.equal(snapshot.provider, "kimi-local-wire");
+  assert.equal(snapshot.daily[0].totalTokens, 1060);
+  assert.equal(snapshot.deduplicatedRecords, 1);
+  assert.deepEqual(snapshot.usageSources, [
+    { id: "kimi-code-cli", wireFiles: 1, usageRecords: 1, acceptedRecords: 1 },
+    { id: "kimi-desktop", wireFiles: 2, usageRecords: 2, acceptedRecords: 1 },
+  ]);
+});
+
 test("Kimi managed usage normalizes weekly and short quota windows", async () => {
   const { normalizeKimiUsagePayload } = await import("../scripts/sync-account-quotas.mjs");
   const snapshot = normalizeKimiUsagePayload({

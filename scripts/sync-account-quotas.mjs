@@ -451,6 +451,12 @@ function kimiCodeHome() {
   return process.env.KIMI_CODE_HOME || join(homedir(), ".kimi-code");
 }
 
+function kimiDesktopCodeHome() {
+  const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming");
+  return process.env.KIMI_DESKTOP_CODE_HOME
+    || join(appData, "kimi-desktop", "daimon-share", "daimon", "runtime", "kimi-code", "home");
+}
+
 function kimiCredentialPath() {
   return process.env.KIMI_CODE_CREDENTIAL_PATH || join(kimiCodeHome(), "credentials", "kimi-code.json");
 }
@@ -647,6 +653,29 @@ function kimiWireFiles(root = join(kimiCodeHome(), "sessions")) {
   return files;
 }
 
+function kimiUsageSources() {
+  const candidates = [
+    { id: "kimi-code-cli", root: join(kimiCodeHome(), "sessions") },
+    { id: "kimi-desktop", root: join(kimiDesktopCodeHome(), "sessions") },
+  ];
+  const seen = new Set();
+  return candidates.filter((source) => {
+    const key = resolve(source.root).toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return existsSync(source.root);
+  });
+}
+
+function kimiUsageRecordKey(record) {
+  return createHash("sha256").update(JSON.stringify({
+    time: record?.time ?? null,
+    model: record?.model ?? null,
+    usageScope: record?.usageScope ?? null,
+    usage: record?.usage ?? null,
+  })).digest("hex");
+}
+
 export function aggregateKimiUsageRecords(records, generatedAt = new Date().toISOString()) {
   const byDay = new Map();
   for (const record of records || []) {
@@ -718,20 +747,68 @@ export function aggregateKimiUsageRecords(records, generatedAt = new Date().toIS
   return { source: "kimi", generatedAt, provider: "kimi-code-wire", daily, totals };
 }
 
+export function mergeKimiUsageSourceRecords(sources, generatedAt = new Date().toISOString()) {
+  const merged = [];
+  const priorCounts = new Map();
+  const usageSources = [];
+  let deduplicatedRecords = 0;
+
+  for (const source of sources || []) {
+    const sourceCounts = new Map();
+    let acceptedRecords = 0;
+    let usageRecords = 0;
+    for (const record of source?.records || []) {
+      if (record?.type !== "usage.record" || record?.usageScope !== "turn") continue;
+      usageRecords += 1;
+      const key = kimiUsageRecordKey(record);
+      const occurrence = (sourceCounts.get(key) || 0) + 1;
+      sourceCounts.set(key, occurrence);
+      if (occurrence <= (priorCounts.get(key) || 0)) {
+        deduplicatedRecords += 1;
+        continue;
+      }
+      merged.push(record);
+      acceptedRecords += 1;
+    }
+    for (const [key, count] of sourceCounts) {
+      priorCounts.set(key, Math.max(priorCounts.get(key) || 0, count));
+    }
+    usageSources.push({
+      id: String(source?.id || "kimi-local"),
+      wireFiles: numberOrZero(source?.wireFiles),
+      usageRecords,
+      acceptedRecords,
+    });
+  }
+
+  return {
+    ...aggregateKimiUsageRecords(merged, generatedAt),
+    provider: "kimi-local-wire",
+    usageSources,
+    deduplicatedRecords,
+  };
+}
+
 function readKimiUsage() {
-  const records = [];
-  for (const filePath of kimiWireFiles()) {
-    const lines = readFileSync(filePath, "utf8").split(/\r?\n/);
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        records.push(JSON.parse(line));
-      } catch (_) {
-        // A partially written final line is ignored until the next refresh.
+  const sources = [];
+  for (const source of kimiUsageSources()) {
+    const files = kimiWireFiles(source.root);
+    const records = [];
+    for (const filePath of files) {
+      const lines = readFileSync(filePath, "utf8").split(/\r?\n/);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const record = JSON.parse(line);
+          if (record?.type === "usage.record") records.push(record);
+        } catch (_) {
+          // A partially written final line is ignored until the next refresh.
+        }
       }
     }
+    sources.push({ id: source.id, wireFiles: files.length, records });
   }
-  return aggregateKimiUsageRecords(records);
+  return mergeKimiUsageSourceRecords(sources);
 }
 
 function writeManagedUsageSnapshot(source, snapshot) {
@@ -989,8 +1066,12 @@ const QUOTA_ADAPTERS = {
     }
   },
   "kimi-managed-usage": async () => {
-    const [snapshot, usage] = await Promise.all([fetchKimiQuota(), Promise.resolve().then(readKimiUsage)]);
-    return { snapshot, usage };
+    const usage = readKimiUsage();
+    try {
+      return { snapshot: await fetchKimiQuota(), usage };
+    } catch (error) {
+      return { snapshot: null, usage, snapshotError: safeError(error) };
+    }
   },
 };
 
@@ -1000,7 +1081,7 @@ async function loadQuota(source) {
   if (!adapter) throw new Error(`No quota adapter is registered for ${source}`);
   const loaded = await adapter(provider);
   if (loaded?.snapshot) loaded.snapshot.source = provider.id;
-  else if (loaded) loaded.source = provider.id;
+  else if (loaded && !loaded.usage) loaded.source = provider.id;
   if (loaded?.usage) loaded.usage.source = provider.id;
   return loaded;
 }
@@ -1017,8 +1098,21 @@ async function main() {
     try {
       const loaded = await loadQuota(source);
       const snapshot = loaded?.snapshot || loaded;
-      const filePath = writeSnapshot(snapshot);
       const usageFile = loaded?.usage ? writeManagedUsageSnapshot(source, loaded.usage) : null;
+      if (!snapshot || loaded?.snapshot === null) {
+        results.push({
+          source,
+          ok: true,
+          partial: true,
+          skipped: false,
+          file: null,
+          usageFile,
+          warning: loaded?.snapshotError || "Account quota was unavailable; local usage was still exported",
+          observation: { recorded: false, file: null, reason: "quota window unavailable" },
+        });
+        continue;
+      }
+      const filePath = writeSnapshot(snapshot);
       const observation = writeQuotaObservation(snapshot, currentUsageAggregate(source, loaded?.usage));
       results.push({ source, ok: true, skipped: false, file: filePath, usageFile, observation, snapshot });
     } catch (error) {
@@ -1027,7 +1121,8 @@ async function main() {
   }
 
   const failures = results.filter((item) => !item.ok);
-  process.stdout.write(`${JSON.stringify({ ok: failures.length === 0, partial: failures.length > 0, results })}\n`);
+  const partial = failures.length > 0 || results.some((item) => item.partial);
+  process.stdout.write(`${JSON.stringify({ ok: failures.length === 0, partial, results })}\n`);
   process.exitCode = failures.length ? 1 : 0;
 }
 

@@ -1,6 +1,6 @@
 # AI Token Ledger
 
-> 一个 Windows-first 的本地 AI coding agent 用量账本：统一查看 Codex、Claude Code、Cursor 与 Kimi Code 的 token 消耗、账户额度、重置时间和耗尽预测。
+> 一个 Windows-first 的本地 AI coding agent 用量账本：统一查看 Codex、Claude Code、Cursor 与 Kimi 的 token 消耗、账户额度、重置时间和耗尽预测。
 
 `AI Token Ledger` 将本机日志和账户额度快照放在同一个本地仪表盘里。它不需要数据库服务，不上传 usage JSON，也不会把每日导出和 `npx` 缓存写进 C 盘用户目录。
 
@@ -57,7 +57,7 @@ Kimi 页面同时展示周额度、短窗口进度、本地 token 速度与跨�
 
 ### 1. 检查运行环境
 
-当前项目面向 Windows 10/11，建议使用 Node.js 22 或更高版本、PowerShell，以及已经登录的 Codex / Claude Code / Cursor。需要 Kimi 数据时还需安装并登录 Kimi Code CLI。
+当前项目面向 Windows 10/11，建议使用 Node.js 22 或更高版本、PowerShell，以及已经登录的 Codex / Claude Code / Cursor。Kimi 官方桌面应用和 Kimi Code CLI 的本地 token 都可读取；只有同步 Kimi 在线额度时才需要安装并登录 Kimi Code CLI。
 
 ```powershell
 node --version
@@ -72,7 +72,7 @@ npx -y ccusage@latest claude daily --help
 npx -y ccusage@latest daily --help
 ```
 
-Kimi Code 是可选来源；安装后运行一次登录即可。仪表盘只读取它自己的凭证文件与本地 usage 记录，不要求把 token 填进本项目。
+Kimi 是可选来源。只使用官方桌面应用时无需额外安装 CLI，每日 token 会从桌面应用的嵌入式 Kimi Code 日志读取；要同时显示周额度和短窗口，安装 CLI 后运行一次登录即可。仪表盘不要求把 token 填进本项目。
 
 ```powershell
 npm install -g @moonshot-ai/kimi-code
@@ -115,7 +115,8 @@ flowchart LR
   A[Codex 本地 JSONL] --> B[ccusage codex daily]
   C[Claude Code 本地 JSONL] --> D[ccusage claude daily]
   E[Cursor 本地数据库] --> F[Cursor usage events]
-  P[Kimi wire.jsonl] --> Q[Kimi usage 聚合]
+  P[Kimi Code CLI wire.jsonl] --> Q[Kimi usage 聚合与去重]
+  T[Kimi 桌面应用 wire.jsonl] --> Q
   B --> G[usage-logs/codex/daily]
   D --> H[usage-logs/claude/daily]
   F --> I[usage-logs/cursor/daily]
@@ -162,7 +163,7 @@ flowchart LR
 | Codex | `ccusage codex daily --json` | 本机 `codex app-server` 的 `account/rateLimits/read` | 5 小时 / 周窗口与重置时间 |
 | Claude Code | `ccusage claude daily --json` | 本机 Claude OAuth 登录态请求 usage 窗口 | 5 小时 / 7 天窗口与重置时间 |
 | Cursor | 最近 90 天 Cursor usage events 聚合 | Cursor usage summary | Cursor 账期、Included in Pro、Auto + Composer、API |
-| Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` 中 turn-scoped `usage.record` | Kimi Code managed usage | 周额度、短窗口与重置时间 |
+| Kimi | CLI `~/.kimi-code/sessions/**/wire.jsonl` + 桌面应用嵌入式 Kimi Code `sessions/**/wire.jsonl` | Kimi Code managed usage | 周额度、短窗口与重置时间 |
 
 ### Codex
 
@@ -176,9 +177,11 @@ Claude Code 的本地 token 明细来自 JSONL；额度窗口来自本机登录�
 
 Cursor 的旧 `plan.used / plan.limit` 单位与“Included in Pro”百分比不是同一件事。项目将设置页同口径的总百分比作为主要额度进度，同时展示 `Auto + Composer`、`API` 和账期；旧单位只作为诊断数据保留，不参与 Pro 百分比预测。
 
-### Kimi Code
+### Kimi
 
-Kimi token 明细来自本机 Kimi Code 会话中的 turn 级 usage 事件，缓存读取、缓存写入、普通输入和输出分别聚合。额度来自 Kimi Code CLI 使用的 managed usage 接口；过期 access token 会使用官方 OAuth refresh 流程在本机刷新，并原子更新 Kimi 自己的凭证文件。任何 token、cookie 或完整设备 ID 都不会返回 WebUI 或写入项目日志。
+Kimi token 明细同时扫描 CLI 与官方桌面应用的本地会话，只累计 turn 级 `usage.record`，缓存读取、缓存写入、普通输入和输出分别聚合。`session` 级汇总不会再次计入；相同事件若同时出现在两套目录，会按时间、模型和 token 构成跨来源去重，主代理与子代理各自真实发生的调用仍会保留。
+
+桌面应用日志位于 `%APPDATA%\kimi-desktop\daimon-share\daimon\runtime\kimi-code\home\sessions`。额度来自 Kimi Code CLI 使用的 managed usage 接口；过期 access token 会使用官方 OAuth refresh 流程在本机刷新，并原子更新 Kimi 自己的凭证文件。在线额度查询失败时，本地每日 token 仍会写入，面板继续保留最近一次成功的额度快照。任何 token、cookie、完整设备 ID 或会话正文都不会返回 WebUI 或写入项目日志。
 
 ## 额度预测：原始 Token、模型等效 Token 与重置
 
@@ -367,7 +370,19 @@ npx -y ccusage@latest claude daily --json
 
 ### 账户额度同步失败
 
-常见原因是网络不可用、CLI 未登录、OAuth 凭证失效，或账户接口结构调整。面板会保留最近成功快照；重新登录相应客户端后点击顶部刷新即可重试。Kimi 可运行 `kimi login` 重新建立登录态。
+常见原因是网络不可用、CLI 未登录、OAuth 凭证失效，或账户接口结构调整。面板会保留最近成功快照；重新登录相应客户端后点击顶部刷新即可重试。Kimi 可运行 `kimi login` 重新建立登录态；即使 Kimi 在线额度失败，CLI/桌面应用的本地每日 token 仍会正常导出。
+
+### Kimi 今天的 token 没出现
+
+先确认至少一套本地会话目录存在，再单独刷新 Kimi：
+
+```powershell
+Test-Path "$HOME\.kimi-code\sessions"
+Test-Path "$env:APPDATA\kimi-desktop\daimon-share\daimon\runtime\kimi-code\home\sessions"
+npm run export:kimi
+```
+
+输出文件仍是 `usage-logs\kimi\daily\kimi-usage-YYYY-MM-DD.json`，同一天重复刷新会覆盖该文件，不会为每次刷新新增快照。
 
 ### 端口 8787 被占用
 
@@ -431,4 +446,4 @@ node --check web/app.js
 node --check web/forecast-model.js
 ```
 
-测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多观测点、额度重置分段、Provider 元数据脱敏，以及 Kimi token/额度规范化。
+测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多观测点、额度重置分段、Provider 元数据脱敏，以及 Kimi CLI/桌面事件合并去重和额度规范化。

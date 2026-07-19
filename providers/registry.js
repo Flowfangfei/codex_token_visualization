@@ -82,22 +82,26 @@ const PROVIDERS = Object.freeze([
   }),
   provider({
     id: "kimi",
-    label: "Kimi Code",
+    label: "Kimi",
     shortLabel: "Kimi",
     tone: "kimi",
     color: "#55784f",
     planLabel: "Kimi Code",
-    subtitle: "Kimi Code 本地 wire 日志",
-    trendTitle: "Kimi Code 最近使用量",
+    subtitle: "Kimi CLI + 桌面应用本地日志",
+    trendTitle: "Kimi 最近使用量",
     breakdownTitle: "Kimi Token 构成",
-    detectPaths: [process.env.KIMI_CODE_HOME || path.join(os.homedir(), ".kimi-code")],
+    detectPaths: [
+      process.env.KIMI_CODE_HOME || path.join(os.homedir(), ".kimi-code"),
+      process.env.KIMI_DESKTOP_CODE_HOME
+        || path.join(APP_DATA, "kimi-desktop", "daimon-share", "daimon", "runtime", "kimi-code", "home"),
+    ],
     usage: {
-      adapter: "kimi-wire",
+      adapter: "kimi-local-wire",
       filePrefix: "kimi-usage",
       logRoot: usageDirectory("kimi", "KIMI_USAGE_LOG_DIR"),
     },
     quota: { adapter: "kimi-managed-usage" },
-    sourceDescription: "Kimi Code wire logs + managed usage API",
+    sourceDescription: "Kimi Code CLI and desktop wire logs + managed usage API",
   }),
 ]);
 
