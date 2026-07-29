@@ -13,6 +13,12 @@ test("public provider metadata excludes backend paths and adapters", () => {
   }
 });
 
+test("automatic refresh excludes the redundant aggregate ccusage scan", () => {
+  assert.deepEqual(registry.AUTO_EXPORT_SOURCES.map((entry) => entry.id), ["codex", "claude"]);
+  assert.equal(registry.AGGREGATE_PROVIDER.usage.autoExport, false);
+  assert.deepEqual(registry.AGGREGATE_PROVIDER.usage.ccusageArgs, ["daily"]);
+});
+
 test("Kimi wire records aggregate only turn-scoped token events", async () => {
   const { aggregateKimiUsageRecords } = await import("../scripts/sync-account-quotas.mjs");
   const records = [

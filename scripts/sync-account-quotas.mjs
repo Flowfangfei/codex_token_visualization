@@ -84,6 +84,19 @@ function codexWindow(name, value) {
   };
 }
 
+function terminateChildProcessTree(child) {
+  if (!child || child.exitCode !== null) return;
+  if (process.platform === "win32" && Number.isInteger(child.pid)) {
+    const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    killer.unref();
+    return;
+  }
+  child.kill("SIGKILL");
+}
+
 function fetchCodexQuota() {
   return new Promise((resolvePromise, rejectPromise) => {
     const isWindows = process.platform === "win32";
@@ -100,7 +113,7 @@ function fetchCodexQuota() {
       clearTimeout(timeout);
       child.stdin.end();
       setTimeout(() => {
-        if (child.exitCode === null) child.kill();
+        terminateChildProcessTree(child);
       }, 250).unref();
       if (error) rejectPromise(error);
       else resolvePromise(value);

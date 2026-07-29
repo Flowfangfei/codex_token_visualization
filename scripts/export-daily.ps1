@@ -43,11 +43,7 @@ if (-not $FileDate) {
 $OutputFile = Join-Path $DailyRoot "$($Config.filePrefix)-$FileDate.json"
 $env:npm_config_cache = $NpmCache
 
-$npxArgs = @(
-  "--cache", $NpmCache,
-  "-y",
-  "ccusage@latest"
-) + @($Config.ccusageArgs) + @(
+$ccusageArgs = @($Config.ccusageArgs) + @(
   "--timezone", $Timezone,
   "--json"
 )
@@ -55,9 +51,28 @@ $npxArgs = @(
 Write-Host "Exporting $Source usage to: $OutputFile"
 Write-Host "Timezone: $Timezone"
 Write-Host "npm cache: $NpmCache"
-Write-Host "Command: npx --cache `"$NpmCache`" -y ccusage@latest $(@($Config.ccusageArgs) -join ' ') --timezone $Timezone --json"
 
-$json = (& npx @npxArgs) -join [Environment]::NewLine
+$directCcusage = $null
+if ($env:CCUSAGE_FORCE_NPX -ne "1") {
+  $directCcusage = @(Get-Command "ccusage" -CommandType Application,ExternalScript -ErrorAction SilentlyContinue)[0]
+}
+
+if ($directCcusage) {
+  $ccusageExecutable = if ($directCcusage.Path) { $directCcusage.Path } else { $directCcusage.Source }
+  Write-Host "Runner: installed ccusage"
+  Write-Host "Command: `"$ccusageExecutable`" $(@($Config.ccusageArgs) -join ' ') --timezone $Timezone --json"
+  $json = (& $ccusageExecutable @ccusageArgs) -join [Environment]::NewLine
+} else {
+  $npxArgs = @(
+    "--cache", $NpmCache,
+    "-y",
+    "ccusage@latest"
+  ) + $ccusageArgs
+  Write-Host "Runner: npx fallback"
+  Write-Host "Command: npx --cache `"$NpmCache`" -y ccusage@latest $(@($Config.ccusageArgs) -join ' ') --timezone $Timezone --json"
+  $json = (& npx @npxArgs) -join [Environment]::NewLine
+}
+
 if ($LASTEXITCODE -ne 0) {
   throw "ccusage export failed with exit code $LASTEXITCODE"
 }

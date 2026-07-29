@@ -157,12 +157,16 @@ const AGGREGATE_PROVIDER = provider({
     filePrefix: "all-usage",
     ccusageArgs: ["daily"],
     logRoot: usageDirectory("all", "ALL_USAGE_LOG_DIR"),
+    autoExport: false,
   },
   quota: null,
   sourceDescription: "ccusage daily aggregate",
 });
 
 const ALL_SOURCES = Object.freeze([...PROVIDERS, AGGREGATE_PROVIDER]);
+const AUTO_EXPORT_SOURCES = Object.freeze(
+  ALL_SOURCES.filter((entry) => entry.usage.adapter === "ccusage" && entry.usage.autoExport !== false)
+);
 
 function getProvider(id, { includeAggregate = true } = {}) {
   const candidates = includeAggregate ? ALL_SOURCES : PROVIDERS;
@@ -191,6 +195,7 @@ module.exports = {
   PROVIDERS,
   AGGREGATE_PROVIDER,
   ALL_SOURCES,
+  AUTO_EXPORT_SOURCES,
   getProvider,
   publicProvider,
 };

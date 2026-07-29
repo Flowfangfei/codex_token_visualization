@@ -64,9 +64,13 @@ node --version
 npx --version
 ```
 
-本项目使用当前维护的 `ccusage` 命令。旧版 `@ccusage/codex` 用户无需卸载，但导出脚本会执行 `npx -y ccusage@latest`，首次运行时自动下载，无需全局安装。
+本项目使用当前维护的 `ccusage` 命令。为了减少每次刷新时重复解析 npm 包的等待，导出脚本会优先使用 `PATH` 中已经安装的 `ccusage`；未找到时才回退到项目内缓存的 `npx -y ccusage@latest`。推荐全局安装一次：
 
 ```powershell
+npm install -g ccusage@latest
+ccusage --version
+
+# 没有全局安装时仍可使用 npx fallback
 npx -y ccusage@latest codex daily --help
 npx -y ccusage@latest claude daily --help
 npx -y ccusage@latest daily --help
@@ -136,12 +140,14 @@ flowchart LR
   J --> O[额度预测与重置分段]
 ```
 
-点击顶部刷新或“全部导出”时，系统固定按以下顺序执行：
+点击顶部刷新或“全部导出”时，系统执行：
 
-1. 从后端注册表读取所有 `ccusage` 来源并导出当日 JSON。
+1. 并行导出需要独立快照的 Codex 与 Claude Code 当日 JSON。
 2. 同步 Codex、Claude Code、Cursor、Kimi Code 的账户额度与本地事件来源。
 3. 记录去重后的分段观测点。
 4. 重新读取当前页面；不管停留在哪个标签页，看到的都是同一轮数据。
+
+`all` 聚合快照不参与页面总览计算；总览会直接合并各 Provider 的快照。因此自动刷新不再重复执行耗时的 `ccusage daily` 聚合扫描。需要兼容旧工作流时，仍可手动运行 `npm run export:all`。
 
 ## 页面说明
 
@@ -310,7 +316,7 @@ Unregister-ScheduledTask -TaskName AITokenLedgerDailyExport -Confirm:$false
 # 运行单元测试
 npm test
 
-# 导出全部本地 token 数据并同步账户额度
+# 快速导出所有独立 Provider 数据并同步账户额度
 npm run export
 
 # 只导出 Codex / Claude / all-agent JSON
@@ -339,7 +345,7 @@ usage-logs/
 ├─ claude/daily/                # 每天一个 Claude Code JSON
 ├─ cursor/daily/                # 每天一个 Cursor events 聚合 JSON
 ├─ kimi/daily/                  # 每天一个 Kimi wire 聚合 JSON
-├─ all/daily/                   # 每天一个 all-agent 聚合 JSON
+├─ all/daily/                   # 手动 export:all 生成的兼容聚合 JSON
 ├─ quota-snapshots/             # 每来源每天一个账户额度快照
 ├─ quota-observations/          # 每来源每天一个观测文件，最多 96 条
 ```
@@ -348,7 +354,7 @@ usage-logs/
 
 - token 快照与额度快照：同一天重复运行会覆盖同名 JSON。
 - 额度观测：每来源每天一个文件，最多 96 个去重观测点，自动保留 120 天。
-- `npx` 缓存：默认位于项目内的 `.npm-cache`。
+- `ccusage`：优先使用 PATH 中的已安装命令；缺失时使用项目内 `.npm-cache` 的 `npx` fallback。
 - 所有上述运行数据都在 `.gitignore` 中，不会被提交到 GitHub。
 
 旧的 `codex-usage-logs/daily` 会作为读取 fallback；新版数据会优先写到 `usage-logs/codex/daily`。

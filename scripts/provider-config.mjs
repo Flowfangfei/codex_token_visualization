@@ -10,7 +10,7 @@ function output(value) {
 }
 
 if (process.argv.includes("--ccusage-sources")) {
-  output(registry.ALL_SOURCES.filter((entry) => entry.usage.adapter === "ccusage").map((entry) => entry.id));
+  output(registry.AUTO_EXPORT_SOURCES.map((entry) => entry.id));
 } else {
   const sourceIndex = process.argv.indexOf("--source");
   const source = sourceIndex >= 0 ? process.argv[sourceIndex + 1] : null;
