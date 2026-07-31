@@ -5,6 +5,10 @@ const els = {
   statusDot: document.querySelector("#statusDot"),
   sourcePath: document.querySelector("#sourcePath"),
   sourceCompare: document.querySelector("#sourceCompare"),
+  calendarHeatmapPanel: document.querySelector("#calendarHeatmapPanel"),
+  calendarHeatmap: document.querySelector("#calendarHeatmap"),
+  heatmapRangePill: document.querySelector("#heatmapRangePill"),
+  heatmapSummary: document.querySelector("#heatmapSummary"),
   detailGrid: document.querySelector("#detailGrid"),
   lowerGrid: document.querySelector("#lowerGrid"),
   tablePanel: document.querySelector("#tablePanel"),
@@ -1279,6 +1283,91 @@ function renderTrend(days, label) {
   els.trendChart.appendChild(svg);
 }
 
+function renderCalendarHeatmap(days) {
+  els.calendarHeatmap.replaceChildren();
+  const heatmapApi = globalThis.CalendarHeatmap;
+  if (!heatmapApi || !days.length) {
+    els.heatmapRangePill.textContent = "--";
+    els.heatmapSummary.textContent = "暂无每日用量记录";
+    els.calendarHeatmap.setAttribute("aria-label", "暂无每日 Token 用量记录");
+    els.calendarHeatmap.appendChild(emptyState("暂无每日用量记录"));
+    return;
+  }
+
+  const model = heatmapApi.buildCalendarHeatmap(days, {
+    today: localDateKey(),
+    minWeeks: 13,
+    maxWeeks: 53,
+  });
+  if (!model.cells.length) {
+    els.heatmapRangePill.textContent = "--";
+    els.heatmapSummary.textContent = "暂无每日用量记录";
+    els.calendarHeatmap.setAttribute("aria-label", "暂无每日 Token 用量记录");
+    els.calendarHeatmap.appendChild(emptyState("暂无每日用量记录"));
+    return;
+  }
+
+  els.heatmapRangePill.textContent = `${model.rangeStart} - ${model.rangeEnd}`;
+  els.heatmapSummary.textContent = `${model.weekCount} 周共 ${formatCompact(model.totalTokens)} Token · ${model.activeDays} 个活跃日`;
+  els.calendarHeatmap.setAttribute(
+    "aria-label",
+    `${model.rangeStart}至${model.rangeEnd}的每日 Token 用量，共${model.activeDays}个活跃日`
+  );
+
+  const shell = document.createElement("div");
+  shell.className = "calendar-heatmap-shell";
+
+  const weekdays = document.createElement("div");
+  weekdays.className = "calendar-heatmap-weekdays";
+  const spacer = document.createElement("span");
+  spacer.setAttribute("aria-hidden", "true");
+  weekdays.appendChild(spacer);
+  ["一", "二", "三", "四", "五", "六", "日"].forEach((label, index) => {
+    const dayLabel = document.createElement("span");
+    dayLabel.textContent = index % 2 === 0 || index === 6 ? label : "";
+    dayLabel.setAttribute("aria-hidden", "true");
+    weekdays.appendChild(dayLabel);
+  });
+  shell.appendChild(weekdays);
+
+  const content = document.createElement("div");
+  content.className = "calendar-heatmap-content";
+  content.style.setProperty("--week-count", model.weekCount);
+
+  const months = document.createElement("div");
+  months.className = "calendar-heatmap-months";
+  months.setAttribute("aria-hidden", "true");
+  model.months.forEach((month) => {
+    const label = document.createElement("span");
+    label.className = "calendar-heatmap-month";
+    label.style.gridColumn = String(month.column);
+    label.textContent = month.label;
+    months.appendChild(label);
+  });
+  content.appendChild(months);
+
+  const grid = document.createElement("div");
+  grid.className = "calendar-heatmap-grid";
+  model.cells.forEach((day) => {
+    const cell = document.createElement("span");
+    cell.className = `calendar-heatmap-cell level-${day.level}`;
+    if (day.outside) {
+      cell.classList.add("is-outside");
+      cell.setAttribute("aria-hidden", "true");
+    } else {
+      const description = `${day.date} · ${formatNumber(day.totalTokens)} Token`;
+      cell.title = description;
+      cell.setAttribute("aria-label", description);
+      cell.setAttribute("role", "img");
+      if (day.date === localDateKey()) cell.classList.add("is-today");
+    }
+    grid.appendChild(cell);
+  });
+  content.appendChild(grid);
+  shell.appendChild(content);
+  els.calendarHeatmap.appendChild(shell);
+}
+
 function renderBreakdown(days) {
   els.breakdown.replaceChildren();
 
@@ -1579,6 +1668,7 @@ function renderUsage(data, view, bundle = {}) {
 
   renderMetrics(days, data.totals || {}, view, bundle);
   renderTrend(days, config.label);
+  if (view === "overview") renderCalendarHeatmap(days);
   renderBreakdown(days);
   renderModels(days);
   renderSnapshots(data);
@@ -1596,6 +1686,7 @@ function setViewVisibility(view) {
   const showReset = view === "overview" || Boolean(providerMeta[view]?.resetCredits);
   els.forecastView.classList.toggle("is-hidden", !isForecast);
   els.metricGrid.classList.toggle("is-hidden", isForecast);
+  els.calendarHeatmapPanel.classList.toggle("is-hidden", view !== "overview");
   els.sourceCompare.classList.toggle("is-hidden", !(view === "overview" || isSources));
   els.detailGrid.classList.toggle("is-hidden", !isUsageView);
   els.lowerGrid.classList.toggle("is-hidden", !isUsageView);

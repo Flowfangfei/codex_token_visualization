@@ -99,6 +99,31 @@
 
         <section class="metric-grid" id="metricGrid"></section>
 
+        <section class="panel calendar-heatmap-panel" id="calendarHeatmapPanel" aria-live="polite">
+          <div class="panel-heading">
+            <div>
+              <p class="section-label">Activity calendar</p>
+              <h2>每日 Token 热力图</h2>
+            </div>
+            <div class="pill" id="heatmapRangePill">--</div>
+          </div>
+          <div class="calendar-heatmap-meta">
+            <p id="heatmapSummary">正在读取每日用量...</p>
+            <div class="calendar-heatmap-legend" aria-label="颜色越深表示当日 Token 用量越高">
+              <span>少</span>
+              <i class="calendar-heatmap-cell level-0" aria-hidden="true"></i>
+              <i class="calendar-heatmap-cell level-1" aria-hidden="true"></i>
+              <i class="calendar-heatmap-cell level-2" aria-hidden="true"></i>
+              <i class="calendar-heatmap-cell level-3" aria-hidden="true"></i>
+              <i class="calendar-heatmap-cell level-4" aria-hidden="true"></i>
+              <span>多</span>
+            </div>
+          </div>
+          <div class="calendar-heatmap-scroll">
+            <div class="calendar-heatmap" id="calendarHeatmap" role="img" aria-label="每日 Token 用量日历热力图"></div>
+          </div>
+        </section>
+
         <section class="source-compare" id="sourceCompare"></section>
 
         <section class="layout-grid" id="detailGrid">
@@ -195,6 +220,7 @@
     </template>
 
     <script src="/forecast-model.js"></script>
+    <script src="/calendar-heatmap.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>
