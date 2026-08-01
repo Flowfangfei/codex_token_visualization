@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { arch, homedir, hostname, release, type } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve, win32 as pathWin32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import providerRegistry from "../providers/registry.js";
@@ -64,7 +64,34 @@ function safeError(error) {
   return String(error?.message || error || "Unknown error")
     .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]")
     .replace(/WorkosCursorSessionToken=[^;\s]+/gi, "WorkosCursorSessionToken=[redacted]")
+    .replace(/((?:access|refresh|id)[_-]?token|cookie)(\s*[=:]\s*)[^\s,;}]+/gi, "$1$2[redacted]")
     .slice(0, 220);
+}
+
+export function resolveCodexCliPath({ platform = process.platform, env = process.env, pathExists = existsSync } = {}) {
+  const configuredPath = String(env.CODEX_CLI_PATH || "").trim();
+  if (configuredPath && pathExists(configuredPath)) return configuredPath;
+  if (platform !== "win32") return "codex";
+
+  const candidates = [];
+  if (env.APPDATA) candidates.push(pathWin32.join(env.APPDATA, "npm", "codex.cmd"));
+  for (const directory of String(env.PATH || "").split(platform === "win32" ? ";" : delimiter).filter(Boolean)) {
+    candidates.push(pathWin32.join(directory.replace(/^"|"$/g, ""), "codex.cmd"));
+  }
+  return candidates.find((candidate) => pathExists(candidate)) || "codex";
+}
+
+export function codexAppServerInvocation(options = {}) {
+  const platform = options.platform || process.platform;
+  const cliPath = resolveCodexCliPath({ ...options, platform });
+  if (platform === "win32" && /\.(?:cmd|bat)$/i.test(cliPath)) {
+    const escapedPath = cliPath.replace(/'/g, "''");
+    return {
+      command: "powershell.exe",
+      args: ["-NoProfile", "-NonInteractive", "-Command", `& '${escapedPath}' app-server --stdio`],
+    };
+  }
+  return { command: cliPath, args: ["app-server", "--stdio"] };
 }
 
 function codexWindow(name, value) {
@@ -86,13 +113,10 @@ function codexWindow(name, value) {
 
 function fetchCodexQuota() {
   return new Promise((resolvePromise, rejectPromise) => {
-    const isWindows = process.platform === "win32";
-    const command = isWindows ? "powershell.exe" : "sh";
-    const args = isWindows
-      ? ["-NoProfile", "-Command", "codex app-server --stdio"]
-      : ["-lc", "codex app-server --stdio"];
+    const { command, args } = codexAppServerInvocation();
     const child = spawn(command, args, { cwd: ROOT, windowsHide: true });
     let buffer = "";
+    let stderr = "";
     let finished = false;
     const finish = (error, value) => {
       if (finished) return;
@@ -146,9 +170,16 @@ function fetchCodexQuota() {
         }
       }
     });
+    child.stderr.on("data", (chunk) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(-4096);
+    });
     child.on("error", (error) => finish(error));
     child.on("close", (code) => {
-      if (!finished) finish(new Error(`Codex account quota process exited (${code ?? "unknown"})`));
+      if (!finished) {
+        const detail = safeError(stderr.trim());
+        const suffix = detail ? `: ${detail}` : "";
+        finish(new Error(`Codex account quota process exited (${code ?? "unknown"})${suffix}`));
+      }
     });
     send({
       method: "initialize",

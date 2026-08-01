@@ -13,6 +13,32 @@ test("public provider metadata excludes backend paths and adapters", () => {
   }
 });
 
+test("Codex quota sync prefers the npm CLI shim over an inaccessible packaged executable", async () => {
+  const { codexAppServerInvocation, resolveCodexCliPath } = await import("../scripts/sync-account-quotas.mjs");
+  const npmShim = "C:\\Users\\example\\AppData\\Roaming\\npm\\codex.cmd";
+  const env = {
+    APPDATA: "C:\\Users\\example\\AppData\\Roaming",
+    CODEX_CLI_PATH: "C:\\stale\\codex.exe",
+    PATH: "C:\\Program Files\\WindowsApps\\OpenAI.Codex\\resources;C:\\Users\\example\\AppData\\Roaming\\npm",
+  };
+  const options = { platform: "win32", env, pathExists: (candidate) => candidate === npmShim };
+
+  assert.equal(resolveCodexCliPath(options), npmShim);
+  assert.deepEqual(codexAppServerInvocation(options), {
+    command: "powershell.exe",
+    args: ["-NoProfile", "-NonInteractive", "-Command", `& '${npmShim}' app-server --stdio`],
+  });
+});
+
+test("Codex quota sync supports an explicit CLI path override", async () => {
+  const { resolveCodexCliPath } = await import("../scripts/sync-account-quotas.mjs");
+  assert.equal(resolveCodexCliPath({
+    platform: "win32",
+    env: { CODEX_CLI_PATH: "D:\\tools\\codex.exe" },
+    pathExists: (candidate) => candidate === "D:\\tools\\codex.exe",
+  }), "D:\\tools\\codex.exe");
+});
+
 test("Kimi wire records aggregate only turn-scoped token events", async () => {
   const { aggregateKimiUsageRecords } = await import("../scripts/sync-account-quotas.mjs");
   const records = [

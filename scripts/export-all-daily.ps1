@@ -13,7 +13,14 @@ if ($LASTEXITCODE -ne 0 -or -not $SourcesBase64) {
   throw "Could not read the registered ccusage providers"
 }
 $SourcesJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(($SourcesBase64 -join "")))
-$Sources = @($SourcesJson | ConvertFrom-Json)
+$ParsedSources = $SourcesJson | ConvertFrom-Json
+$Sources = @()
+foreach ($SourceId in $ParsedSources) {
+  $Sources += [string]$SourceId
+}
+if ($Sources.Count -eq 0) {
+  throw "No registered ccusage providers were returned"
+}
 $Failures = @()
 
 foreach ($Source in $Sources) {
