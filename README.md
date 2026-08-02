@@ -174,7 +174,7 @@ Codex 的额度来自本机 CLI 的 app-server，因此不会把 Codex 登录 to
 
 ### Claude Code
 
-Claude Code 的本地 token 明细来自 JSONL；额度窗口来自本机登录态。当前接口实际返回的每个 `utilization + resets_at` 对象都会自动注册，但预测页只显示周期不短于一周的窗口。全模型周限额始终优先；Fable/Opus/Sonnet 窗口只有在账户接口返回有效数据时才并列显示，不会用总额度伪造数值。模型专属窗口还可通过 `modelPatterns` 只累计相应模型的本地 token。若凭证失效、网络不可用或账户接口调整，面板会保留上一次成功快照并显示同步失败，而不会清空历史数据。[Anthropic 的 Max 计划说明](https://support.claude.com/en/articles/11049741-what-is-the-max-plan)确认 Max 同时存在全模型周限额与模型专属周限额。
+Claude Code 的本地 token 明细来自 JSONL；额度窗口来自本机登录态。当前接口实际返回的每个 `utilization + resets_at` 对象都会自动注册，但预测页只显示周期不短于一周的窗口。全模型周限额始终优先；Fable/Opus/Sonnet 窗口只有在账户接口返回有效数据时才并列显示，不会用总额度伪造数值。模型专属窗口还可通过 `modelPatterns` 只累计相应模型的本地 token。后端会在 access token 临近过期或接口返回 401 时使用 Claude Code 自己的 refresh token 续期，并原子写回轮换后的凭证；如果 refresh token 已被撤销或其他进程轮换失效，则保留上一次成功快照并提示运行 `claude auth login`，不会清空历史数据。[Anthropic 的 Max 计划说明](https://support.claude.com/en/articles/11049741-what-is-the-max-plan)确认 Max 同时存在全模型周限额与模型专属周限额。
 
 ### Cursor Pro
 
@@ -400,7 +400,7 @@ npx -y ccusage@latest claude daily --json
 
 ### 账户额度同步失败
 
-常见原因是网络不可用、CLI 未登录、OAuth 凭证失效，或账户接口结构调整。面板会保留最近成功快照；重新登录相应客户端后点击顶部刷新即可重试。Kimi 可运行 `kimi login` 重新建立登录态；即使 Kimi 在线额度失败，CLI/桌面应用的本地每日 token 仍会正常导出。
+常见原因是网络不可用、CLI 未登录、OAuth refresh token 已被撤销，或账户接口结构调整。面板会保留最近成功快照；重新登录相应客户端后点击顶部刷新即可重试。Claude 显示“需重新登录”时运行 `claude auth login --claudeai`；普通 access token 过期会由后端自动续期，无需重复登录。Kimi 可运行 `kimi login` 重新建立登录态；即使在线额度失败，本地每日 token 仍会正常导出。
 
 ### Kimi 今天的 token 没出现
 

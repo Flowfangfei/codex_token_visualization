@@ -1,5 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const registry = require("../providers/registry.js");
 
 test("public provider metadata excludes backend paths and adapters", () => {
@@ -37,6 +40,80 @@ test("Codex quota sync supports an explicit CLI path override", async () => {
     env: { CODEX_CLI_PATH: "D:\\tools\\codex.exe" },
     pathExists: (candidate) => candidate === "D:\\tools\\codex.exe",
   }), "D:\\tools\\codex.exe");
+});
+
+test("Claude OAuth refresh rotates credentials without dropping unrelated fields", async () => {
+  const { refreshClaudeCredential } = await import("../scripts/sync-account-quotas.mjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "token-ledger-claude-"));
+  const credentialPath = path.join(directory, ".credentials.json");
+  const original = {
+    retainedRootField: { enabled: true },
+    claudeAiOauth: {
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      expiresAt: 1,
+      scopes: ["user:profile"],
+      subscriptionType: "max",
+    },
+  };
+  fs.writeFileSync(credentialPath, JSON.stringify(original), "utf8");
+
+  try {
+    let request = null;
+    const refreshed = await refreshClaudeCredential(original, {
+      credentialPath,
+      now: 1_000_000,
+      fetchImpl: async (url, options) => {
+        request = { url, body: JSON.parse(options.body) };
+        return new Response(JSON.stringify({
+          access_token: "new-access",
+          refresh_token: "new-refresh",
+          expires_in: 3600,
+          scope: "user:profile user:inference",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    const persisted = JSON.parse(fs.readFileSync(credentialPath, "utf8"));
+
+    assert.equal(request.url, "https://platform.claude.com/v1/oauth/token");
+    assert.deepEqual(request.body, {
+      grant_type: "refresh_token",
+      refresh_token: "old-refresh",
+      client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+      scope: "user:profile",
+    });
+    assert.deepEqual(persisted.retainedRootField, { enabled: true });
+    assert.equal(persisted.claudeAiOauth.subscriptionType, "max");
+    assert.equal(persisted.claudeAiOauth.accessToken, "new-access");
+    assert.equal(persisted.claudeAiOauth.refreshToken, "new-refresh");
+    assert.equal(persisted.claudeAiOauth.expiresAt, 4_600_000);
+    assert.deepEqual(refreshed.claudeAiOauth.scopes, ["user:profile", "user:inference"]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Claude OAuth refresh adopts credentials rotated by another process", async () => {
+  const { refreshClaudeCredential } = await import("../scripts/sync-account-quotas.mjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "token-ledger-claude-race-"));
+  const credentialPath = path.join(directory, ".credentials.json");
+  const original = { claudeAiOauth: { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: 1 } };
+  const rotated = { claudeAiOauth: { accessToken: "other-access", refreshToken: "other-refresh", expiresAt: Date.now() + 3600000 } };
+  fs.writeFileSync(credentialPath, JSON.stringify(original), "utf8");
+
+  try {
+    const result = await refreshClaudeCredential(original, {
+      credentialPath,
+      fetchImpl: async () => {
+        fs.writeFileSync(credentialPath, JSON.stringify(rotated), "utf8");
+        return new Response("{}", { status: 400, headers: { "content-type": "application/json" } });
+      },
+    });
+    assert.deepEqual(result, rotated);
+    assert.deepEqual(JSON.parse(fs.readFileSync(credentialPath, "utf8")), rotated);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("Kimi wire records aggregate only turn-scoped token events", async () => {

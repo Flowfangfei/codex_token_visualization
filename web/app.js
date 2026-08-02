@@ -1720,7 +1720,16 @@ async function exportAndRefresh(scope = "current") {
 
     await loadView(currentView);
     if (data.partial) {
-      const failed = (data.results || []).filter((item) => !item.ok).map((item) => item.source).join(", ");
+      const failed = (data.results || [])
+        .filter((item) => !item.ok)
+        .map((item) => {
+          const error = String(item.error || item.warning || "");
+          if (item.source === "quota:claude" && /claude auth login/i.test(error)) {
+            return "quota:claude（需重新登录 Claude Code）";
+          }
+          return item.source;
+        })
+        .join(", ");
       setStatus(`部分导出完成，失败来源：${failed}`, "error");
     } else {
       setStatus(exportSource === "everything" ? "已导出并刷新全部数据源" : "已导出并刷新当前视图", "ok");

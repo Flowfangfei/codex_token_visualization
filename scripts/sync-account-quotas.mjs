@@ -64,7 +64,7 @@ function safeError(error) {
   return String(error?.message || error || "Unknown error")
     .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]")
     .replace(/WorkosCursorSessionToken=[^;\s]+/gi, "WorkosCursorSessionToken=[redacted]")
-    .replace(/((?:access|refresh|id)[_-]?token|cookie)(\s*[=:]\s*)[^\s,;}]+/gi, "$1$2[redacted]")
+    .replace(/(["']?(?:(?:access|refresh|id)[_-]?token|cookie)["']?\s*[=:]\s*)["']?[^"',;\s}]+/gi, "$1[redacted]")
     .slice(0, 220);
 }
 
@@ -245,23 +245,162 @@ export function normalizeClaudeUsagePayload(payload, quotaConfig = {}) {
     .filter(Boolean);
 }
 
-async function fetchClaudeQuota(provider) {
-  const credentialPath = join(homedir(), ".claude", ".credentials.json");
-  if (!existsSync(credentialPath)) throw new Error("Claude OAuth credentials were not found");
-  const credentials = readJson(credentialPath);
+const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_TOKEN_URLS = [
+  "https://platform.claude.com/v1/oauth/token",
+  "https://console.anthropic.com/v1/oauth/token",
+];
+
+function claudeCredentialPath() {
+  return process.env.CLAUDE_CREDENTIAL_PATH || join(homedir(), ".claude", ".credentials.json");
+}
+
+function claudeOauthFrom(credentials) {
   const oauth = credentials?.claudeAiOauth;
-  const accessToken = oauth?.accessToken;
-  if (typeof accessToken !== "string" || !accessToken) throw new Error("Claude OAuth access token was not found");
+  if (!oauth || typeof oauth !== "object") throw new Error("Claude OAuth credentials were not found; run claude auth login");
+  return oauth;
+}
+
+function claudeTokenExpiresSoon(oauth, now = Date.now()) {
+  const rawExpiry = Number(oauth?.expiresAt);
+  if (!Number.isFinite(rawExpiry) || rawExpiry <= 0) return false;
+  const expiresAt = rawExpiry > 1e12 ? rawExpiry : rawExpiry * 1000;
+  return expiresAt <= now + 5 * 60 * 1000;
+}
+
+function claudeRequestHeaders(accessToken) {
+  return {
+    authorization: `Bearer ${accessToken}`,
+    accept: "application/json",
+    "anthropic-beta": "oauth-2025-04-20",
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "x-app": "cli",
+  };
+}
+
+async function fetchClaudeUsage(accessToken, fetchImpl = fetch) {
+  return fetchImpl(CLAUDE_USAGE_URL, {
+    headers: claudeRequestHeaders(accessToken),
+    signal: AbortSignal.timeout(12000),
+  });
+}
+
+function readClaudeCredentials(credentialPath = claudeCredentialPath()) {
+  if (!existsSync(credentialPath)) throw new Error("Claude OAuth credentials were not found; run claude auth login");
+  return readJson(credentialPath);
+}
+
+function rotatedClaudeCredentials(credentialPath, expectedOauth) {
+  try {
+    const latest = readClaudeCredentials(credentialPath);
+    const latestOauth = claudeOauthFrom(latest);
+    const accessChanged = latestOauth.accessToken && latestOauth.accessToken !== expectedOauth.accessToken;
+    const refreshChanged = latestOauth.refreshToken && latestOauth.refreshToken !== expectedOauth.refreshToken;
+    return accessChanged || refreshChanged ? latest : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function waitForRotatedClaudeCredentials(credentialPath, expectedOauth) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const rotated = rotatedClaudeCredentials(credentialPath, expectedOauth);
+    if (rotated) return rotated;
+    if (attempt < 4) await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+  }
+  return null;
+}
+
+export async function refreshClaudeCredential(credentials, options = {}) {
+  const credentialPath = options.credentialPath || claudeCredentialPath();
+  const fetchImpl = options.fetchImpl || fetch;
+  const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+  const oauth = claudeOauthFrom(credentials);
+  const refreshToken = oauth.refreshToken;
+  if (typeof refreshToken !== "string" || !refreshToken) {
+    throw new Error("Claude OAuth token expired and no refresh token is available; run claude auth login");
+  }
+
+  const body = {
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    client_id: CLAUDE_OAUTH_CLIENT_ID,
+  };
+  if (Array.isArray(oauth.scopes) && oauth.scopes.length) body.scope = oauth.scopes.join(" ");
+
+  let response = null;
+  for (let index = 0; index < CLAUDE_TOKEN_URLS.length; index += 1) {
+    const tokenUrl = CLAUDE_TOKEN_URLS[index];
+    try {
+      response = await fetchImpl(tokenUrl, {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json", "x-app": "cli" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(12000),
+      });
+    } catch (error) {
+      if (index + 1 < CLAUDE_TOKEN_URLS.length) continue;
+      throw error;
+    }
+    if (response.ok) break;
+    if ((response.status === 404 || response.status === 405) && index + 1 < CLAUDE_TOKEN_URLS.length) continue;
+
+    const rotated = await waitForRotatedClaudeCredentials(credentialPath, oauth);
+    if (rotated) return rotated;
+    const loginHint = response.status === 400 || response.status === 401 ? "; run claude auth login" : "";
+    throw new Error(`Claude OAuth refresh returned HTTP ${response.status}${loginHint}`);
+  }
+
+  if (!response?.ok) throw new Error("Claude OAuth refresh failed; run claude auth login");
+  const payload = await response.json();
+  if (typeof payload?.access_token !== "string" || !payload.access_token) {
+    throw new Error("Claude OAuth refresh did not return an access token");
+  }
+
+  const latest = readClaudeCredentials(credentialPath);
+  const latestOauth = claudeOauthFrom(latest);
+  if (
+    (latestOauth.accessToken && latestOauth.accessToken !== oauth.accessToken)
+    || (latestOauth.refreshToken && latestOauth.refreshToken !== refreshToken)
+  ) {
+    return latest;
+  }
+
+  const expiresIn = Number(payload.expires_in);
+  const refreshedOauth = {
+    ...latestOauth,
+    accessToken: payload.access_token,
+    refreshToken: payload.refresh_token || refreshToken,
+    expiresAt: Number.isFinite(expiresIn) ? now + expiresIn * 1000 : now + 8 * 60 * 60 * 1000,
+  };
+  if (typeof payload.scope === "string" && payload.scope.trim()) {
+    refreshedOauth.scopes = payload.scope.trim().split(/\s+/);
+  }
+  const refreshed = { ...latest, claudeAiOauth: refreshedOauth };
+  writeJsonAtomically(credentialPath, refreshed);
+  return refreshed;
+}
+
+async function fetchClaudeQuota(provider) {
+  const credentialPath = claudeCredentialPath();
+  let credentials = readClaudeCredentials(credentialPath);
+  let oauth = claudeOauthFrom(credentials);
 
   try {
-    const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        accept: "application/json",
-        "anthropic-beta": "oauth-2025-04-20",
-      },
-      signal: AbortSignal.timeout(12000),
-    });
+    if (claudeTokenExpiresSoon(oauth) || typeof oauth.accessToken !== "string" || !oauth.accessToken) {
+      credentials = await refreshClaudeCredential(credentials, { credentialPath });
+      oauth = claudeOauthFrom(credentials);
+    }
+
+    let response = await fetchClaudeUsage(oauth.accessToken);
+    if (response.status === 401) {
+      const rotated = rotatedClaudeCredentials(credentialPath, oauth);
+      credentials = rotated || await refreshClaudeCredential(credentials, { credentialPath });
+      oauth = claudeOauthFrom(credentials);
+      response = await fetchClaudeUsage(oauth.accessToken);
+    }
     if (!response.ok) throw new Error(`Claude usage endpoint returned HTTP ${response.status}`);
     const payload = await response.json();
     const windows = normalizeClaudeUsagePayload(payload, provider?.quota);
@@ -276,7 +415,10 @@ async function fetchClaudeQuota(provider) {
     };
   } finally {
     // Do not let an OAuth credential remain reachable after the account request.
-    credentials.claudeAiOauth.accessToken = null;
+    if (credentials?.claudeAiOauth) {
+      credentials.claudeAiOauth.accessToken = null;
+      credentials.claudeAiOauth.refreshToken = null;
+    }
   }
 }
 
