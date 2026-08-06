@@ -61,4 +61,4 @@ if ($Failures.Count -gt 0) {
   throw "One or more exports failed:`n$($Failures -join "`n")"
 }
 
-Write-Host "Done: exported every registered ccusage source and synchronized all account quota adapters."
+Write-Host "Done: exported every registered ccusage source and synchronized all managed usage and quota adapters."

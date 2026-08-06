@@ -1,6 +1,6 @@
 # AI Token Ledger
 
-> 一个 Windows-first 的本地 AI coding agent 用量账本：统一查看 Codex、Claude Code、Cursor 与 Kimi 的 token 消耗、账户额度、重置时间和耗尽预测。
+> 一个 Windows-first 的本地 AI coding agent 用量账本：统一查看 Codex、Claude Code、Cursor、Kimi 与 OpenCode 的 token 消耗、账户额度、重置时间和耗尽预测。
 
 `AI Token Ledger` 将本机日志和账户额度快照放在同一个本地仪表盘里。它不需要数据库服务，不上传 usage JSON，也不会把每日导出和 `npx` 缓存写进 C 盘用户目录。
 
@@ -26,6 +26,18 @@ Kimi 页面把会员月总额度和 Kimi Code 周额度注册为两个可切换�
 
 ![Kimi Code 额度预测](docs/assets/forecast-kimi.png)
 
+### OpenCode 本地用量
+
+OpenCode 页面直接汇总本地 SQLite 中的 assistant token 字段，按 `provider/model` 区分不同后端，并保留非缓存输入、缓存读写、输出、推理与费用。采集器不会读取或导出对话正文。
+
+![OpenCode 本地用量](docs/assets/opencode-usage.png)
+
+### 数据源显示设置
+
+齿轮按钮可以选择导航、总览和预测页中关注的 Provider。隐藏只改变页面展示，后台全量刷新和历史快照仍会继续维护所有已注册来源。
+
+![数据源显示设置](docs/assets/provider-settings.png)
+
 ### 新版本提示
 
 只有 GitHub 远端分支确认领先本地时才显示横幅；关闭后同一远端版本不会再次打扰。
@@ -42,10 +54,11 @@ Kimi 页面把会员月总额度和 Kimi Code 周额度注册为两个可切换�
 
 | 能力 | 说明 |
 | --- | --- |
-| 多来源用量账本 | 分别展示 Codex、Claude Code、Cursor、Kimi Code；总览由后端注册表动态聚合。 |
-| 每日快照 | Codex / Claude Code / all-agent 使用 `ccusage` 导出；Cursor 汇总 usage events；Kimi 汇总本地 `wire.jsonl`。 |
-| 官方额度窗口 | 同步四个智能体的当前已用比例、剩余额度、账期或重置时间。 |
+| 多来源用量账本 | 分别展示 Codex、Claude Code、Cursor、Kimi Code 与 OpenCode；总览由后端注册表动态聚合。 |
+| 每日快照 | Codex / Claude Code / all-agent 使用 `ccusage`；Cursor 汇总 usage events；Kimi 汇总 `wire.jsonl`；OpenCode 汇总本地 SQLite。 |
+| 官方额度窗口 | 同步 Codex、Claude Code、Cursor 与 Kimi 的当前已用比例、剩余额度、账期或重置时间。 |
 | 统一刷新 | 顶部刷新和“全部导出”会刷新全部已注册本地 token 与账户额度源。 |
+| 重点来源 | 可自行选择出现在导航、总览和预测页的 Provider；隐藏不停止后台刷新。 |
 | 耗尽预测 | 结合今日实时速度、3 日、7 日速度，预测当前额度窗口的消耗节奏。 |
 | 模型等效 Token | 样本足够时，从官方额度变化反向学习模型权重；不会拿 API 价格伪装成订阅额度换算。 |
 | 日内重置识别 | 上午用完额度、午间重置、下午继续使用时，重置前后的 Token 会自动分段，避免污染拟合。 |
@@ -57,7 +70,7 @@ Kimi 页面把会员月总额度和 Kimi Code 周额度注册为两个可切换�
 
 ### 1. 检查运行环境
 
-当前项目面向 Windows 10/11，建议使用 Node.js 22 或更高版本、PowerShell，以及已经登录的 Codex / Claude Code / Cursor。Kimi 官方桌面应用和 Kimi Code CLI 的本地 token 都可读取；会员月总额来自已登录的 Kimi 桌面应用，周额度来自已登录的 Kimi Code CLI。
+当前项目面向 Windows 10/11，建议使用 Node.js 22 或更高版本、PowerShell，以及已经登录的 Codex / Claude Code / Cursor。Kimi 官方桌面应用和 Kimi Code CLI 的本地 token 都可读取；会员月总额来自已登录的 Kimi 桌面应用，周额度来自已登录的 Kimi Code CLI。OpenCode 是可选来源，Desktop 或 CLI 只要已经生成本地数据库即可，无需把 OpenCode 加入 `PATH`。
 
 ```powershell
 node --version
@@ -78,6 +91,14 @@ Kimi 是可选来源。只使用官方桌面应用时无需额外安装 CLI，�
 npm install -g @moonshot-ai/kimi-code
 kimi login
 ```
+
+OpenCode 默认读取[官方数据目录](https://opencode.ai/docs/troubleshooting/#storage)中的 `opencode.db`：
+
+```powershell
+Test-Path "$HOME\.local\share\opencode\opencode.db"
+```
+
+若数据库位于自定义目录，可在启动仪表盘前设置 `OPENCODE_DB_PATH`。OpenCode 可以连接多个模型 Provider，因此本项目只汇总本地 token 与费用，不虚构一个跨 Provider 的统一订阅额度窗口。
 
 ### 2. 导出第一份数据
 
@@ -119,14 +140,17 @@ flowchart LR
   E[Cursor 本地数据库] --> F[Cursor usage events]
   P[Kimi Code CLI wire.jsonl] --> Q[Kimi usage 聚合与去重]
   T[Kimi 桌面应用 wire.jsonl] --> Q
+  V[OpenCode opencode.db] --> W[assistant message token 聚合]
   B --> G[usage-logs/codex/daily]
   D --> H[usage-logs/claude/daily]
   F --> I[usage-logs/cursor/daily]
   Q --> R[usage-logs/kimi/daily]
+  W --> X[usage-logs/opencode/daily]
   G --> J[AI Token Ledger WebUI]
   H --> J
   I --> J
   R --> J
+  X --> J
   K[Codex app-server] --> L[账户额度快照]
   M[Claude OAuth usage] --> L
   N[Cursor usage summary] --> L
@@ -139,7 +163,7 @@ flowchart LR
 点击顶部刷新或“全部导出”时，系统固定按以下顺序执行：
 
 1. 从后端注册表读取所有 `ccusage` 来源并导出当日 JSON。
-2. 同步 Codex、Claude Code、Cursor、Kimi Code 的账户额度与本地事件来源。
+2. 同步 Codex、Claude Code、Cursor、Kimi Code 的账户额度与本地事件来源，并导出 OpenCode 本地数据库用量。
 3. 记录去重后的分段观测点。
 4. 重新读取当前页面；不管停留在哪个标签页，看到的都是同一轮数据。
 
@@ -153,6 +177,8 @@ flowchart LR
 | `Claude Code` | Claude Code 的每日趋势、缓存构成、费用、模型、快照。 |
 | `Cursor` | Cursor usage events 汇总的独立 token 使用明细。 |
 | `Kimi` | Kimi `usage.record` 的本地 token 明细、会员月额度构成和周额度。 |
+| `OpenCode` | OpenCode assistant 消息的本地 token、费用和 `provider/model` 分布；不生成不存在的统一额度预测。 |
+| `齿轮` | 选择显示在导航、总览和预测中的 Provider；至少保留一个，设置保存在本地。 |
 | `数据源` | 日志目录、检测状态、每日快照和额度观测点数量。 |
 
 页面首次打开只读取已有 JSON，不会自动执行 `npx`。需要最新数据时再点右上角刷新，避免每次打开浏览器都触发导出。
@@ -234,7 +260,7 @@ Provider 定义统一放在后端 [`providers/registry.js`](providers/registry.j
 | --- | --- |
 | `id / label / color` | 稳定标识与展示信息。 |
 | `detectPaths` | 判断本机是否安装或登录。 |
-| `usage.adapter` | `ccusage`、账户事件或本地 wire 日志适配器。 |
+| `usage.adapter` | `ccusage`、账户事件、本地 wire 日志或 SQLite 适配器。 |
 | `usage.filePrefix / logRoot` | 每日覆盖快照的文件名和目录。 |
 | `quota.adapter` | 官方账户额度规范化适配器。 |
 | `quota.discoverWindows` | 是否自动接纳接口中新出现的有效额度窗口。 |
@@ -264,7 +290,9 @@ quota: {
 
 `selectable: false` 可把构成项保留在快照中但不生成独立预测标签，例如 Cursor 的 `Auto + Composer` 与 `API`。没有写入模板、但接口返回有效利用率和重置时间的新窗口会使用字段名生成默认标签并自动进入前端；确认口径后再在模板补上中文名和 `modelPatterns` 即可。
 
-如果协议完全不同，只需在 `scripts/sync-account-quotas.mjs` 的后端 adapter map 新增采集函数，再在注册表引用它；无需修改 `web/index.html` 或增加新的前端分支。注册表返回给浏览器的对象由 `publicProvider()` 白名单生成，不含凭证路径、接口地址、命令参数、窗口模板或 adapter 名称。
+如果协议完全不同，只需在 `scripts/sync-account-quotas.mjs` 的后端 adapter map 新增采集函数，再在注册表引用它；无需增加新的用量页前端分支。OpenCode 就是 `forecast: false`、`quota: null` 的纯本地用量模板示例。注册表返回给浏览器的对象由 `publicProvider()` 白名单生成，不含凭证路径、接口地址、命令参数、窗口模板或 adapter 名称。
+
+Provider 数量增加后不需要删注册项。页面齿轮中的显示设置会把隐藏选择写入 `usage-logs/display-settings.json`；未显示的 Provider 仍参与全量导出，重新勾选后历史立即可见。以后新注册的 Provider 默认自动显示，再由用户决定是否隐藏。
 
 ## 每日自动导出
 
@@ -321,6 +349,9 @@ npm run export:all
 # 只同步 Kimi 本地 token 与账户额度
 npm run export:kimi
 
+# 只同步 OpenCode 本地 token
+npm run export:opencode
+
 # 启动本地 WebUI
 npm start
 ```
@@ -339,7 +370,9 @@ usage-logs/
 ├─ claude/daily/                # 每天一个 Claude Code JSON
 ├─ cursor/daily/                # 每天一个 Cursor events 聚合 JSON
 ├─ kimi/daily/                  # 每天一个 Kimi wire 聚合 JSON
+├─ opencode/daily/              # 每天一个 OpenCode SQLite 聚合 JSON
 ├─ all/daily/                   # 每天一个 all-agent 聚合 JSON
+├─ display-settings.json        # 本地 Provider 显示选择
 ├─ quota-snapshots/             # 每来源每天一个账户额度快照
 ├─ quota-observations/          # 每来源每天一个观测文件，最多 96 条
 ```
@@ -357,8 +390,8 @@ usage-logs/
 
 ### 不会写入项目或提交的内容
 
-- Codex / Claude / Cursor / Kimi 的 access token、refresh token、cookie；
-- 邮箱、完整账户 ID、会话内容、原始 Cursor events；
+- Codex / Claude / Cursor / Kimi / OpenCode 的 access token、refresh token、API key、cookie；
+- 邮箱、完整账户 ID、会话内容、原始 Cursor events 或 OpenCode message 正文；
 - `usage-logs/`、`codex-usage-logs/`、`.npm-cache/`、`verification/`、`node_modules/`。
 
 账户凭证只在本机内存中，用于向对应服务读取自己的账户用量；本地 WebUI 不会把它们返回给浏览器。
@@ -367,7 +400,7 @@ usage-logs/
 
 它很适合回答：
 
-> 我这台机器上的 Codex / Claude Code / Cursor / Kimi Code，最近每天消耗了多少 token？当前额度还剩多少？按现在速度能用多久？
+> 我这台机器上的 Codex / Claude Code / Cursor / Kimi Code / OpenCode，最近每天消耗了多少 token？有官方额度的来源还剩多少？按现在速度能用多久？
 
 它不能保证：
 
@@ -414,6 +447,17 @@ npm run export:kimi
 
 输出文件仍是 `usage-logs\kimi\daily\kimi-usage-YYYY-MM-DD.json`，同一天重复刷新会覆盖该文件，不会为每次刷新新增快照。
 
+### OpenCode 今天的 token 没出现
+
+先确认数据库存在，再单独同步：
+
+```powershell
+Test-Path "$HOME\.local\share\opencode\opencode.db"
+npm run export:opencode
+```
+
+输出文件是 `usage-logs\opencode\daily\opencode-usage-YYYY-MM-DD.json`。采集器优先按 assistant message 聚合；若当前数据库版本没有可用 message token，才回退到 session 累计字段。同一天重复刷新覆盖同名文件。
+
 ### 端口 8787 被占用
 
 ```powershell
@@ -442,6 +486,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\open-dashboard.ps1
 ├─ server.js
 ├─ README.md
 ├─ lib/
+│  ├─ display-settings.js
 │  └─ update-check.js
 ├─ providers/
 │  └─ registry.js
@@ -457,6 +502,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\open-dashboard.ps1
 │  ├─ start-webui.ps1
 │  └─ sync-account-quotas.mjs
 ├─ tests/
+│  ├─ display-settings.test.js
 │  ├─ forecast-model.test.js
 │  ├─ provider-registry.test.js
 │  └─ update-check.test.js
@@ -476,4 +522,4 @@ node --check web/app.js
 node --check web/forecast-model.js
 ```
 
-测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤，以及 Kimi CLI/桌面事件合并去重和额度规范化。
+测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤、Kimi CLI/桌面事件合并去重、OpenCode 多模型聚合，以及显示设置的过滤与最少一个来源约束。

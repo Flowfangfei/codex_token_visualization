@@ -7,13 +7,52 @@ const registry = require("../providers/registry.js");
 
 test("public provider metadata excludes backend paths and adapters", () => {
   const publicEntries = registry.PROVIDERS.map(registry.publicProvider);
-  assert.deepEqual(publicEntries.map((entry) => entry.id), ["codex", "claude", "cursor", "kimi"]);
+  assert.deepEqual(publicEntries.map((entry) => entry.id), ["codex", "claude", "cursor", "kimi", "opencode"]);
   for (const entry of publicEntries) {
     assert.equal("usage" in entry, false);
     assert.equal("quota" in entry, false);
     assert.equal("detectPaths" in entry, false);
     assert.equal("sourceDescription" in entry, false);
   }
+});
+
+test("OpenCode assistant messages aggregate by day and provider-qualified model", async () => {
+  const { aggregateOpenCodeUsageRecords } = await import("../scripts/sync-account-quotas.mjs");
+  const snapshot = aggregateOpenCodeUsageRecords([
+    {
+      date: "2026-08-06",
+      modelName: "deepseek/deepseek-v4-flash",
+      inputTokens: 120,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+      cacheReadTokens: 400,
+      cacheCreationTokens: 20,
+      totalTokens: 580,
+      totalCost: 0.01,
+    },
+    {
+      date: "2026-08-06",
+      modelName: "anthropic/claude-sonnet-4-5",
+      inputTokens: 80,
+      outputTokens: 20,
+      reasoningOutputTokens: 0,
+      cacheReadTokens: 100,
+      cacheCreationTokens: 0,
+      totalTokens: 200,
+      totalCost: 0.02,
+    },
+  ], "2026-08-06T08:00:00.000Z");
+
+  assert.equal(snapshot.provider, "opencode-sqlite");
+  assert.equal(snapshot.recordCount, 2);
+  assert.equal(snapshot.daily.length, 1);
+  assert.equal(snapshot.daily[0].totalTokens, 780);
+  assert.equal(snapshot.daily[0].cacheReadTokens, 500);
+  assert.equal(snapshot.totals.totalCost, 0.03);
+  assert.deepEqual(snapshot.daily[0].modelsUsed, [
+    "deepseek/deepseek-v4-flash",
+    "anthropic/claude-sonnet-4-5",
+  ]);
 });
 
 test("Codex quota sync prefers the npm CLI shim over an inaccessible packaged executable", async () => {

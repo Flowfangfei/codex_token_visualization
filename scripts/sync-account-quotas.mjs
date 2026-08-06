@@ -14,7 +14,9 @@ const QUOTA_ROOT = process.env.QUOTA_SNAPSHOT_DIR || join(USAGE_ROOT, "quota-sna
 const OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || join(USAGE_ROOT, "quota-observations");
 const PROVIDERS = providerRegistry.PROVIDERS;
 const PROVIDER_BY_ID = new Map(PROVIDERS.map((entry) => [entry.id, entry]));
-const SOURCES = PROVIDERS.filter((entry) => entry.forecast && entry.quota).map((entry) => entry.id);
+const SOURCES = PROVIDERS
+  .filter((entry) => entry.quota || entry.usage?.adapter === "opencode-sqlite")
+  .map((entry) => entry.id);
 
 function localDateKey(date = new Date()) {
   const pad = (value) => String(value).padStart(2, "0");
@@ -23,6 +25,158 @@ function localDateKey(date = new Date()) {
 
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+}
+
+function openCodeDatabasePath() {
+  return process.env.OPENCODE_DB_PATH || join(homedir(), ".local", "share", "opencode", "opencode.db");
+}
+
+function openCodeDateKey(value) {
+  const timestamp = Number(value);
+  const date = Number.isFinite(timestamp) ? new Date(timestamp) : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : localDateKey(date);
+}
+
+function openCodeUsageRecord(row) {
+  let data;
+  try {
+    data = typeof row?.data === "string" ? JSON.parse(row.data) : row?.data;
+  } catch (_) {
+    return null;
+  }
+  if (data?.role !== "assistant" || !data?.tokens) return null;
+
+  const inputTokens = Math.max(0, numberOrZero(data.tokens.input));
+  const outputTokens = Math.max(0, numberOrZero(data.tokens.output));
+  const reasoningOutputTokens = Math.max(0, numberOrZero(data.tokens.reasoning));
+  const cacheReadTokens = Math.max(0, numberOrZero(data.tokens.cache?.read));
+  const cacheCreationTokens = Math.max(0, numberOrZero(data.tokens.cache?.write));
+  const calculatedTotal = inputTokens + outputTokens + reasoningOutputTokens + cacheReadTokens + cacheCreationTokens;
+  const totalTokens = Math.max(calculatedTotal, numberOrZero(data.tokens.total));
+  const date = openCodeDateKey(data.time?.created ?? row.time_created);
+  if (!date) return null;
+
+  const modelID = String(data.modelID || "unknown");
+  const providerID = String(data.providerID || "opencode");
+  return {
+    date,
+    modelName: `${providerID}/${modelID}`,
+    inputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    totalTokens,
+    totalCost: Math.max(0, numberOrZero(data.cost)),
+  };
+}
+
+function openCodeSessionRecord(row) {
+  const date = openCodeDateKey(row?.time_created);
+  if (!date) return null;
+  let model = row?.model;
+  try {
+    model = typeof model === "string" ? JSON.parse(model) : model;
+  } catch (_) {
+    model = null;
+  }
+  const inputTokens = Math.max(0, numberOrZero(row?.tokens_input));
+  const outputTokens = Math.max(0, numberOrZero(row?.tokens_output));
+  const reasoningOutputTokens = Math.max(0, numberOrZero(row?.tokens_reasoning));
+  const cacheReadTokens = Math.max(0, numberOrZero(row?.tokens_cache_read));
+  const cacheCreationTokens = Math.max(0, numberOrZero(row?.tokens_cache_write));
+  return {
+    date,
+    modelName: `${model?.providerID || "opencode"}/${model?.id || "unknown"}`,
+    inputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    totalTokens: inputTokens + outputTokens + reasoningOutputTokens + cacheReadTokens + cacheCreationTokens,
+    totalCost: Math.max(0, numberOrZero(row?.cost)),
+  };
+}
+
+export function aggregateOpenCodeUsageRecords(records, generatedAt = new Date().toISOString()) {
+  const fields = [
+    "inputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+    "cacheReadTokens",
+    "cacheCreationTokens",
+    "totalTokens",
+    "totalCost",
+  ];
+  const byDay = new Map();
+
+  for (const record of records || []) {
+    if (!record?.date) continue;
+    const day = byDay.get(record.date) || {
+      date: record.date,
+      inputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 0,
+      totalCost: 0,
+      models: new Map(),
+    };
+    for (const field of fields) day[field] += numberOrZero(record[field]);
+    const model = day.models.get(record.modelName) || Object.fromEntries(fields.map((field) => [field, 0]));
+    for (const field of fields) model[field] += numberOrZero(record[field]);
+    day.models.set(record.modelName, model);
+    byDay.set(record.date, day);
+  }
+
+  const daily = [...byDay.values()]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((day) => ({
+      ...Object.fromEntries(fields.map((field) => [field, day[field]])),
+      date: day.date,
+      modelsUsed: [...day.models.keys()],
+      modelBreakdowns: [...day.models.entries()]
+        .map(([modelName, usage]) => ({ modelName, ...usage }))
+        .sort((a, b) => b.totalTokens - a.totalTokens),
+    }));
+  const totals = Object.fromEntries(fields.map((field) => [field, daily.reduce((sum, day) => sum + numberOrZero(day[field]), 0)]));
+
+  return {
+    source: "opencode",
+    generatedAt,
+    provider: "opencode-sqlite",
+    recordCount: records?.length || 0,
+    daily,
+    totals,
+  };
+}
+
+export function readOpenCodeUsage(databasePath = openCodeDatabasePath()) {
+  if (!existsSync(databasePath)) throw new Error("OpenCode database was not found");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const tableNames = new Set(database.prepare("select name from sqlite_master where type = 'table'").all().map((row) => row.name));
+    let records = [];
+    let recordSource = "message";
+    if (tableNames.has("message")) {
+      records = database.prepare("select time_created, data from message order by time_created")
+        .all()
+        .map(openCodeUsageRecord)
+        .filter(Boolean);
+    }
+    if (!records.length && tableNames.has("session")) {
+      recordSource = "session-fallback";
+      records = database.prepare(`
+        select model, cost, tokens_input, tokens_output, tokens_reasoning,
+               tokens_cache_read, tokens_cache_write, time_created
+        from session order by time_created
+      `).all().map(openCodeSessionRecord).filter(Boolean);
+    }
+    return { ...aggregateOpenCodeUsageRecords(records), recordSource };
+  } finally {
+    database.close();
+  }
 }
 
 function readSettings() {
@@ -1482,8 +1636,17 @@ const QUOTA_ADAPTERS = {
   },
 };
 
+const MANAGED_USAGE_ADAPTERS = {
+  "opencode-sqlite": () => readOpenCodeUsage(),
+};
+
 async function loadQuota(source) {
   const provider = PROVIDER_BY_ID.get(source);
+  if (!provider?.quota) {
+    const usageAdapter = MANAGED_USAGE_ADAPTERS[provider?.usage?.adapter];
+    if (!usageAdapter) throw new Error(`No managed usage adapter is registered for ${source}`);
+    return { snapshot: null, usage: await usageAdapter(provider), quotaExpected: false };
+  }
   const adapter = QUOTA_ADAPTERS[provider?.quota?.adapter];
   if (!adapter) throw new Error(`No quota adapter is registered for ${source}`);
   const loaded = await adapter(provider);
@@ -1509,17 +1672,21 @@ async function main() {
     }
     try {
       const loaded = await loadQuota(source);
+      const provider = PROVIDER_BY_ID.get(source);
       const snapshot = loaded?.snapshot || loaded;
       const usageFile = loaded?.usage ? writeManagedUsageSnapshot(source, loaded.usage) : null;
       if (!snapshot || loaded?.snapshot === null) {
         results.push({
           source,
+          kind: provider?.quota ? "quota" : "usage",
           ok: true,
-          partial: true,
+          partial: Boolean(provider?.quota),
           skipped: false,
           file: null,
           usageFile,
-          warning: loaded?.snapshotError || "Account quota was unavailable; local usage was still exported",
+          warning: provider?.quota
+            ? loaded?.snapshotError || "Account quota was unavailable; local usage was still exported"
+            : null,
           observation: { recorded: false, file: null, reason: "quota window unavailable" },
         });
         continue;
@@ -1528,6 +1695,7 @@ async function main() {
       const observation = writeQuotaObservation(snapshot, currentUsageAggregate(source, loaded?.usage));
       results.push({
         source,
+        kind: "quota",
         ok: true,
         partial: Boolean(loaded?.snapshotWarnings?.length),
         skipped: false,

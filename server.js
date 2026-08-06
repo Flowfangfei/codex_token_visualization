@@ -8,6 +8,7 @@ const {
   ALL_SOURCES,
   publicProvider,
 } = require("./providers/registry.js");
+const { readDisplaySettings, writeDisplaySettings } = require("./lib/display-settings.js");
 const { checkForUpdate } = require("./lib/update-check.js");
 
 const ROOT = __dirname;
@@ -16,6 +17,7 @@ const CODEX_AUTH_PATH = process.env.CODEX_AUTH_PATH || path.join(os.homedir(), "
 const DEFAULT_PORT = 8787;
 const USAGE_LOG_ROOT = process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs");
 const FORECAST_SETTINGS_PATH = process.env.FORECAST_SETTINGS_PATH || path.join(USAGE_LOG_ROOT, "forecast-settings.json");
+const DISPLAY_SETTINGS_PATH = process.env.DISPLAY_SETTINGS_PATH || path.join(USAGE_LOG_ROOT, "display-settings.json");
 const QUOTA_SNAPSHOT_ROOT = process.env.QUOTA_SNAPSHOT_DIR || path.join(USAGE_LOG_ROOT, "quota-snapshots");
 const QUOTA_OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || path.join(USAGE_LOG_ROOT, "quota-observations");
 const FORECAST_AGENTS = PROVIDERS.filter((entry) => entry.forecast && entry.quota).map((entry) => entry.id);
@@ -522,7 +524,7 @@ function runExport(req, res) {
         const quotaSync = await refreshAccountSnapshots();
         const quotaResults = (quotaSync.results || []).map((item) => ({
           ...item,
-          source: `quota:${item.source}`,
+          source: `${item.kind === "usage" ? "usage" : "quota"}:${item.source}`,
         }));
         const combinedResults = [...result.results, ...quotaResults];
         const succeeded = combinedResults.filter((item) => item.ok).length;
@@ -623,6 +625,28 @@ const server = http.createServer((req, res) => {
   try {
     if (req.method === "GET" && req.url.startsWith("/api/providers")) {
       sendJson(res, 200, { ok: true, providers: PROVIDERS.map(publicProvider) });
+      return;
+    }
+
+    if (req.url === "/api/display-settings") {
+      if (req.method === "GET") {
+        sendJson(res, 200, { ok: true, settings: readDisplaySettings(DISPLAY_SETTINGS_PATH, PROVIDERS) });
+        return;
+      }
+
+      if (req.method === "PUT") {
+        readJsonBody(req)
+          .then((payload) => sendJson(res, 200, {
+            ok: true,
+            settings: writeDisplaySettings(DISPLAY_SETTINGS_PATH, payload, PROVIDERS),
+          }))
+          .catch((error) => {
+            sendJson(res, error.statusCode || 400, { ok: false, error: error.message });
+          });
+        return;
+      }
+
+      sendJson(res, 405, { ok: false, error: "Method not allowed" });
       return;
     }
 

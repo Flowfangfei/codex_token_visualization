@@ -34,6 +34,7 @@
           <button class="view-tab" type="button" data-view="forecast">额度预测</button>
           <span class="provider-tab-fragment" id="providerViewTabs"></span>
           <button class="view-tab" type="button" data-view="sources">数据源</button>
+          <button class="display-settings-button" id="displaySettingsBtn" type="button" title="设置显示的数据源" aria-label="设置显示的数据源">⚙</button>
         </nav>
 
         <aside class="update-banner is-hidden" id="updateBanner" aria-live="polite">
@@ -193,6 +194,26 @@
         <div class="metric-sub"></div>
       </article>
     </template>
+
+    <dialog class="settings-dialog" id="displaySettingsDialog" aria-labelledby="displaySettingsTitle">
+      <form class="settings-sheet" method="dialog">
+        <div class="settings-heading">
+          <div>
+            <p class="section-label">Display</p>
+            <h2 id="displaySettingsTitle">数据源显示</h2>
+          </div>
+          <button class="settings-close" id="displaySettingsClose" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="settings-count" id="displaySettingsCount">--</div>
+        <div class="provider-settings-list" id="providerSettingsList"></div>
+        <div class="settings-actions">
+          <button class="secondary-button" id="displaySettingsAll" type="button">全部显示</button>
+          <span class="settings-action-spacer"></span>
+          <button class="secondary-button" id="displaySettingsCancel" type="button">取消</button>
+          <button class="primary-button" id="displaySettingsSave" type="button">保存显示</button>
+        </div>
+      </form>
+    </dialog>
 
     <script src="/forecast-model.js"></script>
     <script src="/app.js"></script>

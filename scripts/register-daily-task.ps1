@@ -30,7 +30,7 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument 
 $trigger = New-ScheduledTaskTrigger -Daily -At $At
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Export Codex, Claude Code, and all-agent token usage JSON into the local project folder." | Out-Null
+Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Export every registered local agent usage source into the project data folder." | Out-Null
 
 Write-Host "Registered daily task: $TaskName"
 Write-Host "Runs every day at: $At"

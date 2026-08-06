@@ -140,6 +140,28 @@ const PROVIDERS = Object.freeze([
     },
     sourceDescription: "Kimi Code CLI and desktop wire logs + Code and membership usage APIs",
   }),
+  provider({
+    id: "opencode",
+    label: "OpenCode",
+    shortLabel: "OpenCode",
+    tone: "opencode",
+    color: "#6b5f86",
+    planLabel: null,
+    subtitle: "OpenCode 本地会话数据库",
+    trendTitle: "OpenCode 最近使用量",
+    breakdownTitle: "OpenCode Token 构成",
+    forecast: false,
+    detectPaths: [
+      process.env.OPENCODE_DB_PATH || path.join(os.homedir(), ".local", "share", "opencode", "opencode.db"),
+    ],
+    usage: {
+      adapter: "opencode-sqlite",
+      filePrefix: "opencode-usage",
+      logRoot: usageDirectory("opencode", "OPENCODE_USAGE_LOG_DIR"),
+    },
+    quota: null,
+    sourceDescription: "OpenCode local SQLite assistant message usage",
+  }),
 ]);
 
 const AGGREGATE_PROVIDER = provider({
