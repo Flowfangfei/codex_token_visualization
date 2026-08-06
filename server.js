@@ -295,17 +295,27 @@ function quotaSnapshots(source) {
   const observationLogDir = path.join(QUOTA_OBSERVATION_ROOT, source);
   const files = listJsonFiles(logDir);
   const daily = files
-    .map((file) => {
+    .flatMap((file) => {
       try {
-        const snapshot = JSON.parse(fs.readFileSync(file.path, "utf8").replace(/^\uFEFF/, ""));
-        return { ...snapshot, file: { name: file.name, modifiedAt: file.modifiedAt, size: file.size } };
+        const payload = JSON.parse(fs.readFileSync(file.path, "utf8").replace(/^\uFEFF/, ""));
+        const snapshots = Array.isArray(payload?.history)
+          ? payload.history
+          : payload?.latest && typeof payload.latest === "object"
+            ? [payload.latest]
+            : [payload];
+        return snapshots.map((snapshot) => ({
+          ...snapshot,
+          file: { name: file.name, modifiedAt: file.modifiedAt, size: file.size },
+        }));
       } catch (_) {
-        return null;
+        return [];
       }
     })
     .filter(Boolean)
     .sort((a, b) => new Date(a.fetchedAt || a.file.modifiedAt) - new Date(b.fetchedAt || b.file.modifiedAt));
-  const observations = listJsonFiles(observationLogDir)
+  const observationFiles = listJsonFiles(observationLogDir);
+  const observationMap = new Map();
+  observationFiles
     .flatMap((file) => {
       try {
         const payload = JSON.parse(fs.readFileSync(file.path, "utf8").replace(/^\uFEFF/, ""));
@@ -314,12 +324,26 @@ function quotaSnapshots(source) {
         return [];
       }
     })
+    .forEach((observation) => {
+      const key = [
+        observation?.windowName || "quota-window",
+        observation?.fetchedAt || "",
+        observation?.segment ?? "",
+        observation?.usedPercent ?? "",
+        observation?.totalTokens ?? "",
+        observation?.resetAt || "",
+      ].join("|");
+      observationMap.set(key, observation);
+    });
+  const observations = [...observationMap.values()]
     .sort((a, b) => new Date(a.fetchedAt || 0) - new Date(b.fetchedAt || 0));
 
   return {
     source,
     logDir,
     observationLogDir,
+    fileCount: files.length,
+    observationFileCount: observationFiles.length,
     latest: daily.at(-1) || null,
     daily,
     observations,
@@ -585,7 +609,9 @@ function sourceStatus() {
       latestFile: snapshot.latestFile,
       dailyCount: snapshot.daily.length,
       quotaLatest: quota?.latest || null,
+      quotaFileCount: quota?.fileCount || 0,
       quotaSnapshotCount: quota?.daily.length || 0,
+      quotaObservationFileCount: quota?.observationFileCount || 0,
       quotaObservationCount: quota?.observations.length || 0,
       detected,
       manualOnly: Boolean(config.manualOnly),

@@ -24,6 +24,7 @@ if (process.argv.includes("--ccusage-sources")) {
       filePrefix: provider.usage.filePrefix,
       ccusageArgs: provider.usage.ccusageArgs,
       logRoot: provider.usage.logRoot,
+      legacyRoots: provider.usage.legacyRoots || [],
     });
   }
 }

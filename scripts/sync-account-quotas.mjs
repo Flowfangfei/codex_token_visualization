@@ -6,6 +6,7 @@ import { delimiter, dirname, join, resolve, win32 as pathWin32 } from "node:path
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import providerRegistry from "../providers/registry.js";
+import { writeConsolidatedUsageSnapshot } from "./usage-storage.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const USAGE_ROOT = process.env.USAGE_LOG_ROOT || join(ROOT, "usage-logs");
@@ -17,6 +18,9 @@ const PROVIDER_BY_ID = new Map(PROVIDERS.map((entry) => [entry.id, entry]));
 const SOURCES = PROVIDERS
   .filter((entry) => entry.quota || entry.usage?.adapter === "opencode-sqlite")
   .map((entry) => entry.id);
+const STORAGE_RETENTION_DAYS = 120;
+const MAX_DAILY_QUOTA_SNAPSHOTS = 180;
+const MAX_QUOTA_OBSERVATIONS = STORAGE_RETENTION_DAYS * 96;
 
 function localDateKey(date = new Date()) {
   const pad = (value) => String(value).padStart(2, "0");
@@ -25,6 +29,26 @@ function localDateKey(date = new Date()) {
 
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+}
+
+function writeJsonAtomic(filePath, value) {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  renameSync(temporaryPath, filePath);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function removeLegacyDatedFiles(logDir, prefix, { exclude = null } = {}) {
+  if (!existsSync(logDir)) return;
+  const pattern = new RegExp(`^${escapeRegExp(prefix)}-\\d{4}-\\d{2}-\\d{2}\\.json$`, "i");
+  for (const name of readdirSync(logDir)) {
+    const filePath = join(logDir, name);
+    if (filePath !== exclude && pattern.test(name)) unlinkSync(filePath);
+  }
 }
 
 function openCodeDatabasePath() {
@@ -1338,9 +1362,13 @@ function writeManagedUsageSnapshot(source, snapshot) {
   const provider = PROVIDER_BY_ID.get(source);
   if (!provider) throw new Error(`Unknown usage source: ${source}`);
   const logDir = provider.usage.logRoot;
-  const filePath = join(logDir, `${provider.usage.filePrefix}-${localDateKey()}.json`);
-  mkdirSync(logDir, { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+  const filePath = join(logDir, `${provider.usage.filePrefix}.json`);
+  writeConsolidatedUsageSnapshot({
+    output: filePath,
+    prefix: provider.usage.filePrefix,
+    roots: [logDir, ...(provider.usage.legacyRoots || [])],
+    incoming: snapshot,
+  });
   return filePath;
 }
 
@@ -1349,12 +1377,13 @@ function usageSnapshotPath(source) {
   if (!provider) return null;
   const logDir = provider.usage.logRoot;
   if (!existsSync(logDir)) return null;
+  const rollingFile = join(logDir, `${provider.usage.filePrefix}.json`);
+  if (existsSync(rollingFile)) return rollingFile;
   const files = readdirSync(logDir)
-    .filter((name) => name.toLowerCase().endsWith(".json"))
+    .filter((name) => new RegExp(`^${escapeRegExp(provider.usage.filePrefix)}-\\d{4}-\\d{2}-\\d{2}\\.json$`, "i").test(name))
     .sort()
     .reverse();
-  const today = `${provider.usage.filePrefix}-${localDateKey()}.json`;
-  return join(logDir, files.includes(today) ? today : files[0] || "");
+  return files.length ? join(logDir, files[0]) : null;
 }
 
 function usageTotal(usage) {
@@ -1403,17 +1432,57 @@ function currentUsageAggregate(source, inMemoryUsage) {
   }
 }
 
+function observationFile(source) {
+  return join(OBSERVATION_ROOT, source, `quota-observations-${source}.json`);
+}
+
 function observationFiles(source) {
   const logDir = join(OBSERVATION_ROOT, source);
   if (!existsSync(logDir)) return [];
+  const rollingName = `quota-observations-${source}.json`;
   return readdirSync(logDir)
-    .filter((name) => /^quota-observations-\d{4}-\d{2}-\d{2}\.json$/i.test(name))
+    .filter((name) => name === rollingName || /^quota-observations-\d{4}-\d{2}-\d{2}\.json$/i.test(name))
     .sort()
     .map((name) => join(logDir, name));
 }
 
+function observationKey(observation) {
+  return [
+    observation?.windowName || "quota-window",
+    observation?.fetchedAt || "",
+    observation?.segment ?? "",
+    observation?.usedPercent ?? "",
+    observation?.totalTokens ?? "",
+    observation?.resetAt || "",
+  ].join("|");
+}
+
+export function mergeObservationHistory(
+  observations,
+  additions = [],
+  {
+    now = new Date(),
+    retentionDays = STORAGE_RETENTION_DAYS,
+    maxEntries = MAX_QUOTA_OBSERVATIONS,
+  } = {},
+) {
+  const cutoff = new Date(now);
+  cutoff.setDate(cutoff.getDate() - retentionDays);
+  const cutoffMs = cutoff.getTime();
+  const byKey = new Map();
+  for (const observation of [...(observations || []), ...(additions || [])]) {
+    const timestamp = new Date(observation?.fetchedAt || 0).getTime();
+    if (!Number.isFinite(timestamp) || timestamp < cutoffMs) continue;
+    byKey.set(observationKey(observation), observation);
+  }
+  const merged = [...byKey.values()].sort(
+    (a, b) => new Date(a.fetchedAt || 0).getTime() - new Date(b.fetchedAt || 0).getTime(),
+  );
+  return compactObservations(merged, maxEntries);
+}
+
 function allObservations(source) {
-  return observationFiles(source).flatMap((filePath) => {
+  const observations = observationFiles(source).flatMap((filePath) => {
     try {
       const payload = readJson(filePath);
       return Array.isArray(payload?.observations) ? payload.observations : [];
@@ -1421,16 +1490,19 @@ function allObservations(source) {
       return [];
     }
   });
+  return mergeObservationHistory(observations);
 }
 
-function cleanupObservations(source, retentionDays = 120) {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - retentionDays);
-  const cutoffKey = localDateKey(cutoff);
-  for (const filePath of observationFiles(source)) {
-    const match = filePath.match(/(\d{4}-\d{2}-\d{2})\.json$/);
-    if (match && match[1] < cutoffKey) unlinkSync(filePath);
-  }
+function persistObservations(source, observations) {
+  const filePath = observationFile(source);
+  writeJsonAtomic(filePath, {
+    source,
+    updatedAt: new Date().toISOString(),
+    retentionDays: STORAGE_RETENTION_DAYS,
+    observations,
+  });
+  removeLegacyDatedFiles(join(OBSERVATION_ROOT, source), "quota-observations", { exclude: filePath });
+  return filePath;
 }
 
 function observationWindows(snapshot) {
@@ -1511,11 +1583,18 @@ export function compactObservations(observations, maxEntries = 96) {
 
 function writeQuotaObservation(snapshot, usageAggregate) {
   const source = snapshot.source;
-  cleanupObservations(source);
-  const windows = observationWindows(snapshot);
-  if (!windows.length) return { recorded: false, file: null, reason: "quota window unavailable" };
-
   const history = allObservations(source);
+  const filesBeforeWrite = observationFiles(source);
+  const rollingFile = observationFile(source);
+  const migrationRequired = filesBeforeWrite.some((filePath) => filePath !== rollingFile);
+  const windows = observationWindows(snapshot);
+  if (!windows.length) {
+    const filePath = history.length && (migrationRequired || !existsSync(rollingFile))
+      ? persistObservations(source, history)
+      : existsSync(rollingFile) ? rollingFile : null;
+    return { recorded: false, file: filePath, reason: "quota window unavailable" };
+  }
+
   const fetchedAt = snapshot.fetchedAt || new Date().toISOString();
   const additions = [];
   for (const window of windows) {
@@ -1553,23 +1632,15 @@ function writeQuotaObservation(snapshot, usageAggregate) {
       resetReason: segmentDecision.reason,
     });
   }
-  if (!additions.length) return { recorded: false, file: null, reason: "unchanged observations" };
-
-  const logDir = join(OBSERVATION_ROOT, source);
-  const filePath = join(logDir, `quota-observations-${localDateKey()}.json`);
-  mkdirSync(logDir, { recursive: true });
-  let observations = [];
-  if (existsSync(filePath)) {
-    try {
-      const current = readJson(filePath);
-      observations = Array.isArray(current?.observations) ? current.observations : [];
-    } catch (_) {
-      observations = [];
-    }
+  if (!additions.length && !migrationRequired && existsSync(rollingFile)) {
+    return { recorded: false, file: rollingFile, reason: "unchanged observations" };
   }
-  observations.push(...additions);
-  observations = compactObservations(observations, 96);
-  writeFileSync(filePath, `${JSON.stringify({ source, date: localDateKey(), observations }, null, 2)}\n`, "utf8");
+
+  const observations = mergeObservationHistory(history, additions);
+  const filePath = persistObservations(source, observations);
+  if (!additions.length) {
+    return { recorded: false, file: filePath, reason: "unchanged observations" };
+  }
   return {
     recorded: true,
     file: filePath,
@@ -1583,13 +1654,81 @@ function writeQuotaObservation(snapshot, usageAggregate) {
 }
 
 function snapshotFile(source) {
-  return join(QUOTA_ROOT, source, `quota-${source}-${localDateKey()}.json`);
+  return join(QUOTA_ROOT, source, `quota-${source}.json`);
+}
+
+function quotaSnapshotFiles(source) {
+  const logDir = join(QUOTA_ROOT, source);
+  if (!existsSync(logDir)) return [];
+  const rollingName = `quota-${source}.json`;
+  const datedPattern = new RegExp(`^quota-${escapeRegExp(source)}-\\d{4}-\\d{2}-\\d{2}\\.json$`, "i");
+  return readdirSync(logDir)
+    .filter((name) => name === rollingName || datedPattern.test(name))
+    .sort()
+    .map((name) => join(logDir, name));
+}
+
+function snapshotDateKey(snapshot) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(snapshot?.date || "")) return snapshot.date;
+  const date = new Date(snapshot?.fetchedAt || snapshot?.generatedAt || 0);
+  return Number.isNaN(date.getTime()) ? null : localDateKey(date);
+}
+
+function snapshotTimestamp(snapshot) {
+  const value = new Date(snapshot?.fetchedAt || snapshot?.generatedAt || 0).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+export function mergeQuotaSnapshotHistory(
+  snapshots,
+  current = null,
+  {
+    now = new Date(),
+    retentionDays = STORAGE_RETENTION_DAYS,
+    maxEntries = MAX_DAILY_QUOTA_SNAPSHOTS,
+  } = {},
+) {
+  const cutoff = new Date(now);
+  cutoff.setDate(cutoff.getDate() - retentionDays);
+  const cutoffKey = localDateKey(cutoff);
+  const byDate = new Map();
+  for (const snapshot of [...(snapshots || []), ...(current ? [current] : [])]) {
+    const dateKey = snapshotDateKey(snapshot);
+    if (!dateKey || dateKey < cutoffKey) continue;
+    const prior = byDate.get(dateKey);
+    if (!prior || snapshotTimestamp(snapshot) >= snapshotTimestamp(prior)) byDate.set(dateKey, snapshot);
+  }
+  return [...byDate.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(-Math.max(1, Math.floor(Number(maxEntries) || MAX_DAILY_QUOTA_SNAPSHOTS)))
+    .map(([, snapshot]) => snapshot);
+}
+
+function readQuotaSnapshotHistory(source) {
+  return quotaSnapshotFiles(source).flatMap((filePath) => {
+    try {
+      const payload = readJson(filePath);
+      if (Array.isArray(payload?.history)) return payload.history;
+      if (payload?.latest && typeof payload.latest === "object") return [payload.latest];
+      return payload && typeof payload === "object" ? [payload] : [];
+    } catch (_) {
+      return [];
+    }
+  });
 }
 
 function writeSnapshot(snapshot) {
-  const filePath = snapshotFile(snapshot.source);
-  mkdirSync(join(QUOTA_ROOT, snapshot.source), { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+  const source = snapshot.source;
+  const filePath = snapshotFile(source);
+  const history = mergeQuotaSnapshotHistory(readQuotaSnapshotHistory(source), snapshot);
+  writeJsonAtomic(filePath, {
+    source,
+    updatedAt: new Date().toISOString(),
+    retentionDays: STORAGE_RETENTION_DAYS,
+    latest: history.at(-1) || snapshot,
+    history,
+  });
+  removeLegacyDatedFiles(join(QUOTA_ROOT, source), `quota-${source}`, { exclude: filePath });
   return filePath;
 }
 

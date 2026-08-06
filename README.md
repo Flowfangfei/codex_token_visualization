@@ -366,25 +366,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.p
 
 ```text
 usage-logs/
-├─ codex/daily/                 # 每天一个 Codex JSON
-├─ claude/daily/                # 每天一个 Claude Code JSON
-├─ cursor/daily/                # 每天一个 Cursor events 聚合 JSON
-├─ kimi/daily/                  # 每天一个 Kimi wire 聚合 JSON
-├─ opencode/daily/              # 每天一个 OpenCode SQLite 聚合 JSON
-├─ all/daily/                   # 每天一个 all-agent 聚合 JSON
+├─ codex/daily/codex-usage.json       # Codex 完整每日历史滚动文件
+├─ claude/daily/claude-usage.json     # Claude Code 完整每日历史滚动文件
+├─ cursor/daily/cursor-usage.json     # Cursor events 完整每日历史滚动文件
+├─ kimi/daily/kimi-usage.json         # Kimi wire 完整每日历史滚动文件
+├─ opencode/daily/opencode-usage.json # OpenCode SQLite 完整每日历史滚动文件
+├─ all/daily/all-usage.json           # all-agent 完整每日历史滚动文件
 ├─ display-settings.json        # 本地 Provider 显示选择
-├─ quota-snapshots/             # 每来源每天一个账户额度快照
-├─ quota-observations/          # 每来源每天一个观测文件，最多 96 条
+├─ forecast-settings.json       # 预测页本地设置
+├─ quota-snapshots/             # 每来源一个额度文件，内含最新值和每日历史
+├─ quota-observations/          # 每来源一个观测文件，内含 120 天重置分段历史
 ```
 
 存储策略：
 
-- token 快照与额度快照：同一天重复运行会覆盖同名 JSON。
-- 额度观测：每来源每天一个文件，最多 96 个去重观测点，自动保留 120 天。
+- 每个数据源只保留一个 token 滚动 JSON；刷新时会把旧账本与新导出按日期合并，`daily` 历史永久保留并据此重算累计 `totals`，统计与图表读取方式不变。
+- 同一天多次刷新时，后一次导出的当日累计值替换前一次，不会把同一天重复相加；日内速率点仍由额度 `observations` 单独记录。
+- 每个有账户额度的数据源只保留一个额度 JSON，其中 `latest` 是最新状态，`history` 是最近 120 天每日快照。
+- 每个有账户额度的数据源只保留一个观测 JSON，其中 `observations` 保留最近 120 天的去重观测点和重置分段边界。120 天清理仅作用于额度拟合观测，不删除 Token 日账本。
+- 所有滚动文件都先写临时文件再原子替换。只有新文件写入成功后，程序才会删除旧的日期命名文件；导出失败时旧数据保持不动。
+- 第一次使用新版刷新时会自动合并旧文件，无需手工迁移。合并只改变物理文件组织，不改变预测拟合、重置分段或模型换算逻辑。
 - `npx` 缓存：默认位于项目内的 `.npm-cache`。
 - 所有上述运行数据都在 `.gitignore` 中，不会被提交到 GitHub。
 
-旧的 `codex-usage-logs/daily` 会作为读取 fallback；新版数据会优先写到 `usage-logs/codex/daily`。
+旧的 `codex-usage-logs/daily` 仍可作为迁移前读取 fallback；Codex 成功导出后会写入 `usage-logs/codex/daily/codex-usage.json` 并清理严格匹配的旧日期快照。
 
 ## 隐私与统计边界
 
@@ -445,7 +450,7 @@ Test-Path "$env:APPDATA\kimi-desktop\daimon-share\daimon\runtime\kimi-code\home\
 npm run export:kimi
 ```
 
-输出文件仍是 `usage-logs\kimi\daily\kimi-usage-YYYY-MM-DD.json`，同一天重复刷新会覆盖该文件，不会为每次刷新新增快照。
+输出文件是 `usage-logs\kimi\daily\kimi-usage.json`。每次刷新原子替换同一个滚动文件，文件内仍包含逐日历史，不会随刷新次数增加文件数量。
 
 ### OpenCode 今天的 token 没出现
 
@@ -456,7 +461,7 @@ Test-Path "$HOME\.local\share\opencode\opencode.db"
 npm run export:opencode
 ```
 
-输出文件是 `usage-logs\opencode\daily\opencode-usage-YYYY-MM-DD.json`。采集器优先按 assistant message 聚合；若当前数据库版本没有可用 message token，才回退到 session 累计字段。同一天重复刷新覆盖同名文件。
+输出文件是 `usage-logs\opencode\daily\opencode-usage.json`。采集器优先按 assistant message 聚合；若当前数据库版本没有可用 message token，才回退到 session 累计字段。每次刷新原子替换同一个滚动文件。
 
 ### 端口 8787 被占用
 

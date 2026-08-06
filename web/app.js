@@ -1650,8 +1650,8 @@ function renderSourceStatus(payload) {
       </div>
       <div class="source-status-lines">
         <span>${escapeHtml(source.command)}</span>
-        <span>${source.fileCount} files · ${source.dailyCount} daily rows</span>
-        <span>${source.quotaSnapshotCount || 0} daily quota files · ${source.quotaObservationCount || 0} reset-segment observations${source.quotaLatest ? ` · ${escapeHtml(source.quotaLatest.file?.name || "latest")}` : ""}</span>
+        <span>${source.fileCount} 个滚动账本 · ${source.dailyCount} 个日明细</span>
+        <span>${source.quotaFileCount || 0} 个额度文件 · ${source.quotaSnapshotCount || 0} 个日历史 · ${source.quotaObservationFileCount || 0} 个观测文件 · ${source.quotaObservationCount || 0} 个观测点${source.quotaLatest ? ` · ${escapeHtml(source.quotaLatest.file?.name || "latest")}` : ""}</span>
         <span title="${escapeHtml(source.primaryLogDir)}">${escapeHtml(source.primaryLogDir)}</span>
       </div>
     `;
@@ -1727,7 +1727,7 @@ async function loadSourcesView() {
   renderMetric("数据源", `${sources.length} 个`, `${providerCatalog.length} 个智能体 + 聚合来源`);
   renderMetric("已有快照", `${ready} 个`, "至少导出一次后显示");
   renderMetric("计划任务", "12:00", "默认每天中午导出");
-  renderMetric("存储位置", "项目内", "同一天刷新覆盖同名 JSON");
+  renderMetric("存储位置", "项目内", "滚动 JSON，Token 日账本永久保留");
   renderSourceStatus(data);
   setStatus(`已读取 ${sources.length} 个数据源状态`, "ok");
 }
