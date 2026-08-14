@@ -1,6 +1,6 @@
 # AI Token Ledger
 
-> 一个 Windows-first 的本地 AI coding agent 用量账本：统一查看 Codex、Claude Code、Cursor、Kimi 与 OpenCode 的 token 消耗、账户额度、重置时间和耗尽预测。
+> 一个 Windows-first 的本地 AI coding agent 用量账本：统一查看 Codex、Claude Code、Cursor、Kimi、OpenCode 与 DeepSeek Harness 的 token 消耗、账户额度、重置时间和耗尽预测。
 
 `AI Token Ledger` 将本机日志和账户额度快照放在同一个本地仪表盘里。它不需要数据库服务，不上传 usage JSON，也不会把每日导出和 `npx` 缓存写进 C 盘用户目录。
 
@@ -32,6 +32,12 @@ OpenCode 页面直接汇总本地 SQLite 中的 assistant token 字段，按 `pr
 
 ![OpenCode 本地用量](docs/assets/opencode-usage.png)
 
+### DeepSeek Harness 本地用量
+
+DeepSeek Harness 页面只读扫描本地 `session.jsonl.zstd`，按会话、推理步骤和模型聚合 usage。流式 usage 会被同一步骤的最终 usage 替换，推理 token 作为输出子项单列，不重复计入总 token。
+
+![DeepSeek Harness 本地用量](docs/assets/deepseek-harness-usage.png)
+
 ### 数据源显示设置
 
 齿轮按钮可以选择导航、总览和预测页中关注的 Provider。隐藏只改变页面展示，后台全量刷新和历史快照仍会继续维护所有已注册来源。
@@ -54,8 +60,8 @@ OpenCode 页面直接汇总本地 SQLite 中的 assistant token 字段，按 `pr
 
 | 能力 | 说明 |
 | --- | --- |
-| 多来源用量账本 | 分别展示 Codex、Claude Code、Cursor、Kimi Code 与 OpenCode；总览由后端注册表动态聚合。 |
-| 每日快照 | Codex / Claude Code / all-agent 使用 `ccusage`；Cursor 汇总 usage events；Kimi 汇总 `wire.jsonl`；OpenCode 汇总本地 SQLite。 |
+| 多来源用量账本 | 分别展示 Codex、Claude Code、Cursor、Kimi Code、OpenCode 与 DeepSeek Harness；总览由后端注册表动态聚合。 |
+| 每日快照 | Codex / Claude Code / all-agent 使用 `ccusage`；Cursor 汇总 usage events；Kimi 汇总 `wire.jsonl`；OpenCode 汇总 SQLite；DeepSeek Harness 汇总 Zstandard 会话计量事件。 |
 | 官方额度窗口 | 同步 Codex、Claude Code、Cursor 与 Kimi 的当前已用比例、剩余额度、账期或重置时间。 |
 | 统一刷新 | 顶部刷新和“全部导出”会刷新全部已注册本地 token 与账户额度源。 |
 | 重点来源 | 可自行选择出现在导航、总览和预测页的 Provider；隐藏不停止后台刷新。 |
@@ -70,7 +76,7 @@ OpenCode 页面直接汇总本地 SQLite 中的 assistant token 字段，按 `pr
 
 ### 1. 检查运行环境
 
-当前项目面向 Windows 10/11，建议使用 Node.js 22 或更高版本、PowerShell，以及已经登录的 Codex / Claude Code / Cursor。Kimi 官方桌面应用和 Kimi Code CLI 的本地 token 都可读取；会员月总额来自已登录的 Kimi 桌面应用，周额度来自已登录的 Kimi Code CLI。OpenCode 是可选来源，Desktop 或 CLI 只要已经生成本地数据库即可，无需把 OpenCode 加入 `PATH`。
+当前项目面向 Windows 10/11，建议使用 Node.js 22.15 或更高版本、PowerShell，以及已经登录的 Codex / Claude Code / Cursor。Node 22.15 是读取 DeepSeek Harness Zstandard 会话日志所需的最低版本。Kimi 官方桌面应用和 Kimi Code CLI 的本地 token 都可读取；会员月总额来自已登录的 Kimi 桌面应用，周额度来自已登录的 Kimi Code CLI。OpenCode 与 DeepSeek Harness 是可选来源，只要已经生成对应本地日志即可，无需把它们加入 `PATH`。
 
 ```powershell
 node --version
@@ -99,6 +105,26 @@ Test-Path "$HOME\.local\share\opencode\opencode.db"
 ```
 
 若数据库位于自定义目录，可在启动仪表盘前设置 `OPENCODE_DB_PATH`。OpenCode 可以连接多个模型 Provider，因此本项目只汇总本地 token 与费用，不虚构一个跨 Provider 的统一订阅额度窗口。
+
+DeepSeek Harness 默认读取当前机器上的：
+
+```powershell
+Test-Path "D:\deepseek-harness\.dsh-home\sessions"
+```
+
+自定义安装可在启动仪表盘或执行导出前设置路径。`DEEPSEEK_HARNESS_SESSION_ROOT` 优先级最高；也可设置 Harness 项目根目录或 home：
+
+```powershell
+$env:DEEPSEEK_HARNESS_ROOT = "D:\deepseek-harness"
+$env:DEEPSEEK_HARNESS_HOME = "D:\deepseek-harness\.dsh-home"
+$env:DEEPSEEK_HARNESS_SESSION_ROOT = "D:\deepseek-harness\.dsh-home\sessions"
+```
+
+默认只统计路由标识为 `deepseek` 或 `deepseek-official` 的调用，避免把 Harness 中转到其他厂商的模型误记为 DeepSeek。确有自定义 DeepSeek 路由时，可用逗号分隔覆盖：
+
+```powershell
+$env:DEEPSEEK_HARNESS_PROVIDER_IDS = "deepseek,deepseek-official,my-deepseek-gateway"
+```
 
 ### 2. 导出第一份数据
 
@@ -141,16 +167,19 @@ flowchart LR
   P[Kimi Code CLI wire.jsonl] --> Q[Kimi usage 聚合与去重]
   T[Kimi 桌面应用 wire.jsonl] --> Q
   V[OpenCode opencode.db] --> W[assistant message token 聚合]
+  Y[DeepSeek Harness session.jsonl.zstd] --> Z[逐步骤 usage 去重]
   B --> G[usage-logs/codex/daily]
   D --> H[usage-logs/claude/daily]
   F --> I[usage-logs/cursor/daily]
   Q --> R[usage-logs/kimi/daily]
   W --> X[usage-logs/opencode/daily]
+  Z --> AA[usage-logs/deepseek-harness/daily]
   G --> J[AI Token Ledger WebUI]
   H --> J
   I --> J
   R --> J
   X --> J
+  AA --> J
   K[Codex app-server] --> L[账户额度快照]
   M[Claude OAuth usage] --> L
   N[Cursor usage summary] --> L
@@ -163,7 +192,7 @@ flowchart LR
 点击顶部刷新或“全部导出”时，系统固定按以下顺序执行：
 
 1. 从后端注册表读取所有 `ccusage` 来源并导出当日 JSON。
-2. 同步 Codex、Claude Code、Cursor、Kimi Code 的账户额度与本地事件来源，并导出 OpenCode 本地数据库用量。
+2. 同步 Codex、Claude Code、Cursor、Kimi Code 的账户额度与本地事件来源，并导出 OpenCode 与 DeepSeek Harness 本地用量。
 3. 记录去重后的分段观测点。
 4. 重新读取当前页面；不管停留在哪个标签页，看到的都是同一轮数据。
 
@@ -178,6 +207,7 @@ flowchart LR
 | `Cursor` | Cursor usage events 汇总的独立 token 使用明细。 |
 | `Kimi` | Kimi `usage.record` 的本地 token 明细、会员月额度构成和周额度。 |
 | `OpenCode` | OpenCode assistant 消息的本地 token、费用和 `provider/model` 分布；不生成不存在的统一额度预测。 |
+| `DeepSeek Harness` | Harness 会话中实际路由到 DeepSeek 的逐日 token、缓存、输出、推理与模型分布；不读取正文，也不虚构账户额度。 |
 | `齿轮` | 选择显示在导航、总览和预测中的 Provider；至少保留一个，设置保存在本地。 |
 | `数据源` | 日志目录、检测状态、每日快照和额度观测点数量。 |
 
@@ -193,6 +223,8 @@ flowchart LR
 | Claude Code | `ccusage claude daily --json` | 本机 Claude OAuth 登录态请求 usage 窗口 | 7 天总额，以及接口实际开放的 Opus、Sonnet、Fable 等周级模型窗口 |
 | Cursor | 最近 90 天 Cursor usage events 聚合 | Cursor usage summary | Cursor 账期、Included in Pro、Auto + Composer、API |
 | Kimi | CLI `~/.kimi-code/sessions/**/wire.jsonl` + 桌面应用嵌入式 Kimi Code `sessions/**/wire.jsonl` | Kimi 会员 subscription stats + Kimi Code managed usage | 会员月总额及 Kimi / Code 构成、周额度与各自重置时间 |
+| OpenCode | `~/.local/share/opencode/opencode.db` 中的 assistant token 字段 | 无统一账户口径 | 不生成额度窗口 |
+| DeepSeek Harness | `.dsh-home/sessions/**/session.jsonl.zstd` 中的 usage 事件 | 未发现可验证的本机统一额度接口 | 不生成额度窗口 |
 
 ### Codex
 
@@ -213,6 +245,14 @@ Kimi token 明细同时扫描 CLI 与官方桌面应用的本地会话，只累�
 桌面应用日志位于 `%APPDATA%\kimi-desktop\daimon-share\daimon\runtime\kimi-code\home\sessions`。会员月总额通过 Kimi Web 与桌面应用共用的 `GetSubscriptionStats` 接口读取，使用桌面应用自己的登录态，只保留总已用比例、Code 占比和精确到时分的到期时间；面板中的“月度 Kimi”由总比例减去 Code 比例得到。Kimi Code 周额度来自 CLI managed usage 接口，过期 CLI access token 会使用官方 OAuth refresh 流程在本机刷新，并原子更新 Kimi 自己的凭证文件。
 
 两套在线额度相互独立降级：未安装 Kimi Code CLI 时仍可显示会员月总额；Kimi 桌面应用未登录或登录态过期时仍可显示 CLI 的周额度。在线额度查询失败也不影响本地每日 token 导出，面板会保留最近一次成功的额度快照。任何 token、cookie、完整账户 ID 或会话正文都不会返回 WebUI 或写入项目日志。[Kimi 会员额度规则](https://www.kimi.com/zh-cn/help/membership/membership-update-rules)说明月额度按订阅周期恢复；[Kimi Code 权益说明](https://www.kimi.com/zh-cn/help/kimi-code/benefits)说明另有周额度和 5 小时滚动窗口，但预测页只保留周额度及以上口径。
+
+### DeepSeek Harness
+
+采集器按 Harness 自己的持久化协议扫描由多个独立 Zstandard frame 拼接而成的会话文件。每个 `(session, turn, step)` 只保留最后一份 usage：正常完成时以 `assistant/message.usage` 为准；请求中断但已经产生 usage chunk 时保留该早期样本。总 token 按普通输入、输出、缓存读取和缓存写入相加，`reasoningTokens` 是输出的子项，只单独展示而不重复累加。
+
+解析结果只含日期、Provider、模型和 token 数字。会话 ID、工作目录、请求头正文、用户消息、助手文本和工具内容均在解析时丢弃，不会写入 `usage-logs`。活动文件末尾若存在未完成 frame，会保留此前完整 frame 并跳过残缺尾部；单个损坏文件不会阻止其他会话统计，但所有文件均不可解码时导出会失败并保留旧账本。
+
+DeepSeek Harness 目前作为纯本地用量来源接入。没有经过验证的官方账户额度百分比与重置时间接口，因此页面不会凭 token 数量伪造额度或耗尽预测。
 
 ## 额度预测：原始 Token、模型等效 Token 与重置
 
@@ -290,7 +330,7 @@ quota: {
 
 `selectable: false` 可把构成项保留在快照中但不生成独立预测标签，例如 Cursor 的 `Auto + Composer` 与 `API`。没有写入模板、但接口返回有效利用率和重置时间的新窗口会使用字段名生成默认标签并自动进入前端；确认口径后再在模板补上中文名和 `modelPatterns` 即可。
 
-如果协议完全不同，只需在 `scripts/sync-account-quotas.mjs` 的后端 adapter map 新增采集函数，再在注册表引用它；无需增加新的用量页前端分支。OpenCode 就是 `forecast: false`、`quota: null` 的纯本地用量模板示例。注册表返回给浏览器的对象由 `publicProvider()` 白名单生成，不含凭证路径、接口地址、命令参数、窗口模板或 adapter 名称。
+如果协议完全不同，只需在 `scripts/sync-account-quotas.mjs` 的后端 adapter map 新增采集函数，再在注册表引用它；无需增加新的用量页前端分支。OpenCode 和 DeepSeek Harness 都是 `forecast: false`、`quota: null` 的纯本地用量模板示例。注册表返回给浏览器的对象由 `publicProvider()` 白名单生成，不含凭证路径、接口地址、命令参数、窗口模板或 adapter 名称。
 
 Provider 数量增加后不需要删注册项。页面齿轮中的显示设置会把隐藏选择写入 `usage-logs/display-settings.json`；未显示的 Provider 仍参与全量导出，重新勾选后历史立即可见。以后新注册的 Provider 默认自动显示，再由用户决定是否隐藏。
 
@@ -352,6 +392,9 @@ npm run export:kimi
 # 只同步 OpenCode 本地 token
 npm run export:opencode
 
+# 只同步 DeepSeek Harness 本地 token
+npm run export:deepseek-harness
+
 # 启动本地 WebUI
 npm start
 ```
@@ -371,6 +414,7 @@ usage-logs/
 ├─ cursor/daily/cursor-usage.json     # Cursor events 完整每日历史滚动文件
 ├─ kimi/daily/kimi-usage.json         # Kimi wire 完整每日历史滚动文件
 ├─ opencode/daily/opencode-usage.json # OpenCode SQLite 完整每日历史滚动文件
+├─ deepseek-harness/daily/deepseek-harness-usage.json # Harness 完整每日历史滚动文件
 ├─ all/daily/all-usage.json           # all-agent 完整每日历史滚动文件
 ├─ display-settings.json        # 本地 Provider 显示选择
 ├─ forecast-settings.json       # 预测页本地设置
@@ -395,8 +439,8 @@ usage-logs/
 
 ### 不会写入项目或提交的内容
 
-- Codex / Claude / Cursor / Kimi / OpenCode 的 access token、refresh token、API key、cookie；
-- 邮箱、完整账户 ID、会话内容、原始 Cursor events 或 OpenCode message 正文；
+- Codex / Claude / Cursor / Kimi / OpenCode / DeepSeek Harness 的 access token、refresh token、API key、cookie；
+- 邮箱、完整账户 ID、会话内容、原始 Cursor events、OpenCode message 正文或 Harness message/tool 正文；
 - `usage-logs/`、`codex-usage-logs/`、`.npm-cache/`、`verification/`、`node_modules/`。
 
 账户凭证只在本机内存中，用于向对应服务读取自己的账户用量；本地 WebUI 不会把它们返回给浏览器。
@@ -405,7 +449,7 @@ usage-logs/
 
 它很适合回答：
 
-> 我这台机器上的 Codex / Claude Code / Cursor / Kimi Code / OpenCode，最近每天消耗了多少 token？有官方额度的来源还剩多少？按现在速度能用多久？
+> 我这台机器上的 Codex / Claude Code / Cursor / Kimi Code / OpenCode / DeepSeek Harness，最近每天消耗了多少 token？有官方额度的来源还剩多少？按现在速度能用多久？
 
 它不能保证：
 
@@ -463,6 +507,18 @@ npm run export:opencode
 
 输出文件是 `usage-logs\opencode\daily\opencode-usage.json`。采集器优先按 assistant message 聚合；若当前数据库版本没有可用 message token，才回退到 session 累计字段。每次刷新原子替换同一个滚动文件。
 
+### DeepSeek Harness 今天的 token 没出现
+
+先检查 Node 版本、默认会话目录和单独导出：
+
+```powershell
+node --version
+Test-Path "D:\deepseek-harness\.dsh-home\sessions"
+npm run export:deepseek-harness
+```
+
+要求 Node.js `>=22.15`。输出文件是 `usage-logs\deepseek-harness\daily\deepseek-harness-usage.json`。如果 Harness 使用自定义 home，请先设置 `DEEPSEEK_HARNESS_HOME` 或 `DEEPSEEK_HARNESS_SESSION_ROOT`；如果使用自定义 DeepSeek 路由名，再设置 `DEEPSEEK_HARNESS_PROVIDER_IDS`。顶部刷新与每日定时任务都会调用同一采集器。
+
 ### 端口 8787 被占用
 
 ```powershell
@@ -479,7 +535,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-webui.ps1 -P
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\open-dashboard.ps1 -Port 8787
 ```
 
-重点检查 Node.js 是否安装、版本是否至少为 22，以及 `node` 是否在 `PATH` 中。
+重点检查 Node.js 是否安装、版本是否至少为 22.15，以及 `node` 是否在 `PATH` 中。
 
 ## 项目结构
 
@@ -527,4 +583,4 @@ node --check web/app.js
 node --check web/forecast-model.js
 ```
 
-测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤、Kimi CLI/桌面事件合并去重、OpenCode 多模型聚合，以及显示设置的过滤与最少一个来源约束。
+测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤、Kimi CLI/桌面事件合并去重、OpenCode 多模型聚合、DeepSeek Harness 多 frame 解码与逐步骤去重，以及显示设置的过滤与最少一个来源约束。

@@ -4,6 +4,11 @@ const path = require("node:path");
 const ROOT = path.resolve(__dirname, "..");
 const USAGE_ROOT = process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs");
 const APP_DATA = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+const DEEPSEEK_HARNESS_ROOT = process.env.DEEPSEEK_HARNESS_ROOT || "D:\\deepseek-harness";
+const DEEPSEEK_HARNESS_HOME = process.env.DEEPSEEK_HARNESS_HOME
+  || path.join(DEEPSEEK_HARNESS_ROOT, ".dsh-home");
+const DEEPSEEK_HARNESS_SESSION_ROOT = process.env.DEEPSEEK_HARNESS_SESSION_ROOT
+  || path.join(DEEPSEEK_HARNESS_HOME, "sessions");
 
 function usageDirectory(id, envName) {
   return process.env[envName] || path.join(USAGE_ROOT, id, "daily");
@@ -161,6 +166,31 @@ const PROVIDERS = Object.freeze([
     },
     quota: null,
     sourceDescription: "OpenCode local SQLite assistant message usage",
+  }),
+  provider({
+    id: "deepseek-harness",
+    label: "DeepSeek Harness",
+    shortLabel: "DeepSeek",
+    tone: "deepseek",
+    color: "#4c64b8",
+    planLabel: null,
+    subtitle: "DeepSeek Harness 本地会话计量",
+    trendTitle: "DeepSeek Harness 最近使用量",
+    breakdownTitle: "DeepSeek Harness Token 构成",
+    forecast: false,
+    detectPaths: [DEEPSEEK_HARNESS_SESSION_ROOT],
+    usage: {
+      adapter: "deepseek-harness-zstd",
+      filePrefix: "deepseek-harness-usage",
+      logRoot: usageDirectory("deepseek-harness", "DEEPSEEK_HARNESS_USAGE_LOG_DIR"),
+      sessionRoot: DEEPSEEK_HARNESS_SESSION_ROOT,
+      providerIds: String(process.env.DEEPSEEK_HARNESS_PROVIDER_IDS || "deepseek,deepseek-official")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean),
+    },
+    quota: null,
+    sourceDescription: "DeepSeek Harness local Zstandard session usage events",
   }),
 ]);
 

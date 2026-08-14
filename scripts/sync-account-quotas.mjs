@@ -5,6 +5,7 @@ import { arch, homedir, hostname, release, type } from "node:os";
 import { delimiter, dirname, join, resolve, win32 as pathWin32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { zstdDecompressSync } from "node:zlib";
 import providerRegistry from "../providers/registry.js";
 import { writeConsolidatedUsageSnapshot } from "./usage-storage.mjs";
 
@@ -15,8 +16,9 @@ const QUOTA_ROOT = process.env.QUOTA_SNAPSHOT_DIR || join(USAGE_ROOT, "quota-sna
 const OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || join(USAGE_ROOT, "quota-observations");
 const PROVIDERS = providerRegistry.PROVIDERS;
 const PROVIDER_BY_ID = new Map(PROVIDERS.map((entry) => [entry.id, entry]));
+const MANAGED_USAGE_ADAPTER_IDS = new Set(["opencode-sqlite", "deepseek-harness-zstd"]);
 const SOURCES = PROVIDERS
-  .filter((entry) => entry.quota || entry.usage?.adapter === "opencode-sqlite")
+  .filter((entry) => entry.quota || MANAGED_USAGE_ADAPTER_IDS.has(entry.usage?.adapter))
   .map((entry) => entry.id);
 const STORAGE_RETENTION_DAYS = 120;
 const MAX_DAILY_QUOTA_SNAPSHOTS = 180;
@@ -201,6 +203,282 @@ export function readOpenCodeUsage(databasePath = openCodeDatabasePath()) {
   } finally {
     database.close();
   }
+}
+
+const ZSTD_MAGIC = 0xFD2FB528;
+
+export function scanZstdFrameRanges(buffer) {
+  const frames = [];
+  let offset = 0;
+
+  while (offset < buffer.length) {
+    const start = offset;
+    if (buffer.length - offset < 4) return { frames, tornStart: start };
+    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) {
+      throw new Error(`Invalid Zstandard frame magic at byte ${offset}`);
+    }
+    offset += 4;
+
+    if (offset === buffer.length) return { frames, tornStart: start };
+    const descriptor = buffer.readUInt8(offset);
+    offset += 1;
+    if ((descriptor & 0x18) !== 0) {
+      throw new Error(`Invalid Zstandard frame descriptor at byte ${offset - 1}`);
+    }
+
+    const contentSizeFlag = descriptor >>> 6;
+    const singleSegment = (descriptor & 0x20) !== 0;
+    const checksum = (descriptor & 0x04) !== 0;
+    const dictionaryFlag = descriptor & 0x03;
+    const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag;
+    const contentSizeBytes = contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentSizeFlag;
+    const remainingHeaderBytes = (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes;
+    if (buffer.length - offset < remainingHeaderBytes) return { frames, tornStart: start };
+    offset += remainingHeaderBytes;
+
+    for (;;) {
+      if (buffer.length - offset < 3) return { frames, tornStart: start };
+      const blockHeader = buffer.readUIntLE(offset, 3);
+      offset += 3;
+      const lastBlock = (blockHeader & 1) !== 0;
+      const blockType = (blockHeader >>> 1) & 0x03;
+      const blockSize = blockHeader >>> 3;
+      if (blockType === 0x03) throw new Error(`Invalid Zstandard block type at byte ${offset - 3}`);
+      const payloadBytes = blockType === 0x01 ? 1 : blockSize;
+      if (buffer.length - offset < payloadBytes) return { frames, tornStart: start };
+      offset += payloadBytes;
+      if (lastBlock) break;
+    }
+
+    if (checksum) {
+      if (buffer.length - offset < 4) return { frames, tornStart: start };
+      offset += 4;
+    }
+    frames.push({ start, end: offset });
+  }
+
+  return { frames };
+}
+
+function deepSeekHarnessRoute(value) {
+  const provider = typeof value?.provider === "string" ? value.provider.trim() : "";
+  const model = typeof value?.model === "string" ? value.model.trim() : "";
+  return provider && model ? { provider, model } : null;
+}
+
+function deepSeekHarnessUsage(value) {
+  if (!value || typeof value !== "object") return null;
+  const inputTokens = Math.max(0, numberOrZero(value.inputTokens));
+  const outputTokens = Math.max(0, numberOrZero(value.outputTokens));
+  const reasoningOutputTokens = Math.max(0, numberOrZero(value.reasoningTokens));
+  const cacheReadTokens = Math.max(0, numberOrZero(value.cacheReadTokens));
+  const cacheCreationTokens = Math.max(0, numberOrZero(value.cacheWriteTokens));
+  return {
+    inputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens,
+    totalCost: 0,
+  };
+}
+
+function deepSeekHarnessDate(value, fallback) {
+  const candidate = value ?? fallback;
+  if (candidate === null || candidate === undefined || candidate === "") return null;
+  const timestamp = Number(candidate);
+  const date = Number.isFinite(timestamp) ? new Date(timestamp) : new Date(candidate);
+  return Number.isNaN(date.getTime()) ? null : localDateKey(date);
+}
+
+function deepSeekHarnessStepKey(data) {
+  const turn = Number(data?.turn);
+  const step = Number(data?.step);
+  return Number.isInteger(turn) && Number.isInteger(step) ? `${turn}:${step}` : null;
+}
+
+function sanitizedDeepSeekHarnessEvent(record) {
+  if (!record || typeof record !== "object") return null;
+  if (record.type === "session") {
+    return { type: "session", createdAt: record.createdAt };
+  }
+  if (record.type === "request/header") {
+    const route = deepSeekHarnessRoute(record.data?.header?.config);
+    return route ? { type: record.type, time: record.time, route } : null;
+  }
+  if (record.type === "request/context") {
+    const route = deepSeekHarnessRoute(record.data);
+    return route ? { type: record.type, time: record.time, route } : null;
+  }
+  if (record.type === "assistant/chunk" && record.data?.chunk?.type === "usage") {
+    const key = deepSeekHarnessStepKey(record.data);
+    const usage = deepSeekHarnessUsage(record.data.chunk.usage);
+    return key && usage ? { type: record.type, time: record.time, key, usage } : null;
+  }
+  if (record.type === "assistant/message") {
+    const key = deepSeekHarnessStepKey(record.data);
+    if (!key) return null;
+    return {
+      type: record.type,
+      time: record.time,
+      key,
+      route: deepSeekHarnessRoute(record.data?.message?.source),
+      usage: deepSeekHarnessUsage(record.data?.usage),
+    };
+  }
+  return null;
+}
+
+function parseDeepSeekHarnessJsonl(text, events, stats) {
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = sanitizedDeepSeekHarnessEvent(JSON.parse(line));
+      if (event) events.push(event);
+    } catch (_) {
+      stats.invalidLines += 1;
+    }
+  }
+}
+
+export function decodeDeepSeekHarnessSessionBuffer(buffer, { compressed = true } = {}) {
+  const events = [];
+  const stats = { frames: 0, tornFrame: false, invalidLines: 0 };
+  if (!compressed) {
+    parseDeepSeekHarnessJsonl(buffer.toString("utf8"), events, stats);
+    return { events, ...stats };
+  }
+
+  const scan = scanZstdFrameRanges(buffer);
+  stats.frames = scan.frames.length;
+  stats.tornFrame = scan.tornStart !== undefined;
+  let pending = "";
+  for (const frame of scan.frames) {
+    const text = pending + zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString("utf8");
+    const lines = text.split(/\r?\n/);
+    pending = lines.pop() || "";
+    parseDeepSeekHarnessJsonl(lines.join("\n"), events, stats);
+  }
+  if (pending.trim()) parseDeepSeekHarnessJsonl(pending, events, stats);
+  return { events, ...stats };
+}
+
+function deepSeekHarnessSessionFiles(root) {
+  const files = [];
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop();
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(entryPath);
+      else if (entry.isFile() && (entry.name === "session.jsonl.zstd" || entry.name === "session.jsonl")) {
+        files.push(entryPath);
+      }
+    }
+  }
+  return files.sort();
+}
+
+export function aggregateDeepSeekHarnessEvents(
+  sessions,
+  generatedAt = new Date().toISOString(),
+  { providerIds = ["deepseek", "deepseek-official"], sourceStats = {} } = {},
+) {
+  const allowedProviders = new Set(providerIds.map((value) => String(value).trim().toLowerCase()).filter(Boolean));
+  const records = [];
+
+  for (const events of sessions || []) {
+    const steps = new Map();
+    let route = null;
+    let sessionTime = null;
+    for (const event of events || []) {
+      if (event.type === "session") {
+        sessionTime = event.createdAt;
+        continue;
+      }
+      if (event.type === "request/header" || event.type === "request/context") {
+        route = event.route;
+        continue;
+      }
+      if (event.type === "assistant/chunk") {
+        steps.set(event.key, {
+          route,
+          date: deepSeekHarnessDate(event.time, sessionTime),
+          usage: event.usage,
+        });
+        continue;
+      }
+      if (event.type === "assistant/message") {
+        const previous = steps.get(event.key);
+        if (!previous && !event.usage) continue;
+        steps.set(event.key, {
+          route: event.route || previous?.route || route,
+          date: deepSeekHarnessDate(event.time, sessionTime) || previous?.date || null,
+          usage: event.usage || previous?.usage,
+        });
+      }
+    }
+
+    for (const step of steps.values()) {
+      const providerId = String(step.route?.provider || "").toLowerCase();
+      if (!step.date || !step.usage || !allowedProviders.has(providerId)) continue;
+      records.push({
+        date: step.date,
+        modelName: `${step.route.provider}/${step.route.model}`,
+        ...step.usage,
+      });
+    }
+  }
+
+  const snapshot = aggregateOpenCodeUsageRecords(records, generatedAt);
+  return {
+    ...snapshot,
+    source: "deepseek-harness",
+    provider: "deepseek-harness-session-zstd",
+    recordCount: records.length,
+    providerFilter: [...allowedProviders],
+    ...sourceStats,
+  };
+}
+
+export function readDeepSeekHarnessUsage(provider) {
+  const sessionRoot = provider?.usage?.sessionRoot
+    || process.env.DEEPSEEK_HARNESS_SESSION_ROOT
+    || join(process.env.DEEPSEEK_HARNESS_HOME || "D:\\deepseek-harness\\.dsh-home", "sessions");
+  if (!existsSync(sessionRoot)) throw new Error("DeepSeek Harness session directory was not found");
+
+  const files = deepSeekHarnessSessionFiles(sessionRoot);
+  if (!files.length) throw new Error("DeepSeek Harness has no session logs");
+  const sessions = [];
+  const sourceStats = {
+    scannedFiles: files.length,
+    decodedFiles: 0,
+    unreadableFiles: 0,
+    decodedFrames: 0,
+    tornFiles: 0,
+    invalidLines: 0,
+  };
+  for (const filePath of files) {
+    try {
+      const decoded = decodeDeepSeekHarnessSessionBuffer(readFileSync(filePath), {
+        compressed: filePath.endsWith(".zstd"),
+      });
+      if (!decoded.events.length) throw new Error("DeepSeek Harness session log has no decodable events");
+      sessions.push(decoded.events);
+      sourceStats.decodedFiles += 1;
+      sourceStats.decodedFrames += decoded.frames;
+      sourceStats.tornFiles += decoded.tornFrame ? 1 : 0;
+      sourceStats.invalidLines += decoded.invalidLines;
+    } catch (_) {
+      sourceStats.unreadableFiles += 1;
+    }
+  }
+  if (!sourceStats.decodedFiles) throw new Error("DeepSeek Harness session logs could not be decoded");
+  return aggregateDeepSeekHarnessEvents(sessions, new Date().toISOString(), {
+    providerIds: provider?.usage?.providerIds,
+    sourceStats,
+  });
 }
 
 function readSettings() {
@@ -1777,6 +2055,7 @@ const QUOTA_ADAPTERS = {
 
 const MANAGED_USAGE_ADAPTERS = {
   "opencode-sqlite": () => readOpenCodeUsage(),
+  "deepseek-harness-zstd": (provider) => readDeepSeekHarnessUsage(provider),
 };
 
 async function loadQuota(source) {

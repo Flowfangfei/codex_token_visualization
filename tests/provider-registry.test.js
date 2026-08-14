@@ -3,17 +3,118 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { zstdCompressSync } = require("node:zlib");
 const registry = require("../providers/registry.js");
 
 test("public provider metadata excludes backend paths and adapters", () => {
   const publicEntries = registry.PROVIDERS.map(registry.publicProvider);
-  assert.deepEqual(publicEntries.map((entry) => entry.id), ["codex", "claude", "cursor", "kimi", "opencode"]);
+  assert.deepEqual(publicEntries.map((entry) => entry.id), [
+    "codex",
+    "claude",
+    "cursor",
+    "kimi",
+    "opencode",
+    "deepseek-harness",
+  ]);
   for (const entry of publicEntries) {
     assert.equal("usage" in entry, false);
     assert.equal("quota" in entry, false);
     assert.equal("detectPaths" in entry, false);
     assert.equal("sourceDescription" in entry, false);
   }
+});
+
+test("DeepSeek Harness concatenated Zstandard frames decode without exposing message content", async () => {
+  const { decodeDeepSeekHarnessSessionBuffer, scanZstdFrameRanges } = await import("../scripts/sync-account-quotas.mjs");
+  const first = zstdCompressSync(`${JSON.stringify({
+    type: "session",
+    id: "must-not-survive",
+    createdAt: new Date(2026, 7, 13, 9, 0).getTime(),
+  })}\n${JSON.stringify({
+    type: "request/context",
+    time: new Date(2026, 7, 13, 9, 1).getTime(),
+    data: { provider: "deepseek-official", model: "deepseek-v4-pro", contextWindow: 128000 },
+  })}\n`);
+  const second = zstdCompressSync(`${JSON.stringify({
+    type: "assistant/chunk",
+    time: new Date(2026, 7, 13, 9, 2).getTime(),
+    data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 10, outputTokens: 5 } } },
+  })}\n`);
+  const unfinished = zstdCompressSync(`${JSON.stringify({ type: "turn/end", data: { reason: "done" } })}\n`);
+  const buffer = Buffer.concat([first, second, unfinished.subarray(0, Math.floor(unfinished.length / 2))]);
+
+  const scan = scanZstdFrameRanges(buffer);
+  assert.equal(scan.frames.length, 2);
+  assert.equal(typeof scan.tornStart, "number");
+  const decoded = decodeDeepSeekHarnessSessionBuffer(buffer);
+  assert.equal(decoded.frames, 2);
+  assert.equal(decoded.tornFrame, true);
+  assert.deepEqual(decoded.events.map((event) => event.type), [
+    "session",
+    "request/context",
+    "assistant/chunk",
+  ]);
+  assert.equal(JSON.stringify(decoded).includes("must-not-survive"), false);
+});
+
+test("DeepSeek Harness final usage replaces stream usage and excludes other routes", async () => {
+  const { aggregateDeepSeekHarnessEvents } = await import("../scripts/sync-account-quotas.mjs");
+  const morning = new Date(2026, 7, 13, 9, 0).getTime();
+  const snapshot = aggregateDeepSeekHarnessEvents([[
+    { type: "session", createdAt: morning },
+    { type: "request/context", route: { provider: "deepseek-official", model: "deepseek-v4-pro" } },
+    {
+      type: "assistant/chunk",
+      key: "1:1",
+      time: morning,
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        reasoningOutputTokens: 2,
+        cacheReadTokens: 20,
+        cacheCreationTokens: 1,
+        totalTokens: 36,
+        totalCost: 0,
+      },
+    },
+    {
+      type: "assistant/message",
+      key: "1:1",
+      time: morning + 1000,
+      route: { provider: "deepseek-official", model: "deepseek-v4-pro" },
+      usage: {
+        inputTokens: 12,
+        outputTokens: 6,
+        reasoningOutputTokens: 3,
+        cacheReadTokens: 20,
+        cacheCreationTokens: 1,
+        totalTokens: 39,
+        totalCost: 0,
+      },
+    },
+    { type: "request/context", route: { provider: "openai", model: "gpt-5.5" } },
+    {
+      type: "assistant/chunk",
+      key: "1:2",
+      time: morning + 2000,
+      usage: {
+        inputTokens: 999,
+        outputTokens: 999,
+        reasoningOutputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 1998,
+        totalCost: 0,
+      },
+    },
+  ]], "2026-08-13T01:00:00.000Z");
+
+  assert.equal(snapshot.provider, "deepseek-harness-session-zstd");
+  assert.equal(snapshot.recordCount, 1);
+  assert.equal(snapshot.daily.length, 1);
+  assert.equal(snapshot.daily[0].totalTokens, 39);
+  assert.equal(snapshot.daily[0].reasoningOutputTokens, 3);
+  assert.equal(snapshot.daily[0].modelBreakdowns[0].modelName, "deepseek-official/deepseek-v4-pro");
 });
 
 test("OpenCode assistant messages aggregate by day and provider-qualified model", async () => {
