@@ -47,6 +47,15 @@ const els = {
   forecastSourcePill: document.querySelector("#forecastSourcePill"),
   forecastRateList: document.querySelector("#forecastRateList"),
   viewTabs: document.querySelector(".view-tabs"),
+  displaySettingsBtn: document.querySelector("#displaySettingsBtn"),
+  displaySettingsDialog: document.querySelector("#displaySettingsDialog"),
+  displaySettingsClose: document.querySelector("#displaySettingsClose"),
+  displaySettingsCount: document.querySelector("#displaySettingsCount"),
+  providerSettingsList: document.querySelector("#providerSettingsList"),
+  displaySettingsAll: document.querySelector("#displaySettingsAll"),
+  displaySettingsCancel: document.querySelector("#displaySettingsCancel"),
+  displaySettingsSave: document.querySelector("#displaySettingsSave"),
+  forecastViewTab: document.querySelector('.view-tab[data-view="forecast"]'),
 };
 
 const VIEW_CONFIGS = {
@@ -76,6 +85,7 @@ let currentView = "overview";
 let latestResetCredits = null;
 let providerCatalog = [];
 let providerMeta = {};
+let visibleProviderIds = new Set();
 let forecastAgent = null;
 let forecastSnapshots = {};
 let forecastQuotas = {};
@@ -90,9 +100,17 @@ function forecastTabElements() {
   return [...document.querySelectorAll(".forecast-agent-tab")];
 }
 
-function configureProviders(providers) {
+function visibleProviders() {
+  return providerCatalog.filter((provider) => visibleProviderIds.has(provider.id));
+}
+
+function configureProviders(providers, requestedVisibleProviders) {
   providerCatalog = Array.isArray(providers) ? providers.filter((entry) => entry?.id && entry?.label) : [];
   providerMeta = Object.fromEntries(providerCatalog.map((entry) => [entry.id, entry]));
+  const navigableIds = providerCatalog.filter((entry) => entry.navigation !== false).map((entry) => entry.id);
+  const requested = Array.isArray(requestedVisibleProviders) ? requestedVisibleProviders : navigableIds;
+  const nextVisible = requested.filter((id) => navigableIds.includes(id));
+  visibleProviderIds = new Set(nextVisible.length ? nextVisible : navigableIds.slice(0, 1));
 
   els.providerViewTabs.replaceChildren();
   els.forecastAgentTabs.replaceChildren();
@@ -107,7 +125,7 @@ function configureProviders(providers) {
       breakdownTitle: provider.breakdownTitle,
       resetCredits: provider.resetCredits,
     };
-    if (provider.navigation !== false) {
+    if (provider.navigation !== false && visibleProviderIds.has(provider.id)) {
       const tab = document.createElement("button");
       tab.className = "view-tab";
       tab.type = "button";
@@ -116,7 +134,7 @@ function configureProviders(providers) {
       tab.style.setProperty("--provider-color", provider.color || "var(--rust)");
       els.providerViewTabs.appendChild(tab);
     }
-    if (provider.forecast !== false) {
+    if (provider.forecast !== false && visibleProviderIds.has(provider.id)) {
       const tab = document.createElement("button");
       tab.className = "forecast-agent-tab";
       tab.type = "button";
@@ -127,14 +145,89 @@ function configureProviders(providers) {
       els.forecastAgentTabs.appendChild(tab);
     }
   }
-  forecastAgent = providerCatalog.find((entry) => entry.forecast !== false)?.id || null;
+  const forecastProviders = visibleProviders().filter((entry) => entry.forecast !== false);
+  forecastAgent = forecastProviders.some((entry) => entry.id === forecastAgent)
+    ? forecastAgent
+    : forecastProviders[0]?.id || null;
+  els.forecastViewTab.classList.toggle("is-hidden", forecastProviders.length === 0);
 }
 
 async function loadProviderCatalog() {
-  const response = await fetch("/api/providers", { cache: "no-store" });
-  if (!response.ok) throw new Error(`Provider registry HTTP ${response.status}`);
-  const payload = await response.json();
-  configureProviders(payload.providers);
+  const [providerResponse, settingsResponse] = await Promise.all([
+    fetch("/api/providers", { cache: "no-store" }),
+    fetch("/api/display-settings", { cache: "no-store" }),
+  ]);
+  if (!providerResponse.ok) throw new Error(`Provider registry HTTP ${providerResponse.status}`);
+  if (!settingsResponse.ok) throw new Error(`Display settings HTTP ${settingsResponse.status}`);
+  const [providerPayload, settingsPayload] = await Promise.all([providerResponse.json(), settingsResponse.json()]);
+  configureProviders(providerPayload.providers, settingsPayload.settings?.visibleProviders);
+}
+
+function selectedProviderIds() {
+  return [...els.providerSettingsList.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => input.value);
+}
+
+function updateDisplaySettingsCount() {
+  const count = selectedProviderIds().length;
+  const available = providerCatalog.filter((entry) => entry.navigation !== false).length;
+  els.displaySettingsCount.textContent = `${count} / ${available} 已显示`;
+  els.displaySettingsSave.disabled = count === 0;
+}
+
+function renderDisplaySettings() {
+  els.providerSettingsList.replaceChildren();
+  for (const provider of providerCatalog.filter((entry) => entry.navigation !== false)) {
+    const label = document.createElement("label");
+    label.className = "provider-setting-row";
+    label.innerHTML = `
+      <input type="checkbox" value="${escapeHtml(provider.id)}" ${visibleProviderIds.has(provider.id) ? "checked" : ""} />
+      <span class="provider-setting-swatch" style="background:${escapeHtml(provider.color || "#9b4732")}"></span>
+      <span class="provider-setting-copy">
+        <strong>${escapeHtml(provider.label)}</strong>
+        <span>${provider.forecast === false ? "本地用量" : "用量与额度预测"}</span>
+      </span>
+    `;
+    els.providerSettingsList.appendChild(label);
+  }
+  updateDisplaySettingsCount();
+}
+
+function openDisplaySettings() {
+  renderDisplaySettings();
+  els.displaySettingsDialog.showModal();
+}
+
+function closeDisplaySettings() {
+  els.displaySettingsDialog.close();
+}
+
+async function saveDisplaySettings() {
+  const selected = selectedProviderIds();
+  if (!selected.length) return;
+  els.displaySettingsSave.disabled = true;
+  try {
+    const response = await fetch("/api/display-settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ visibleProviders: selected }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    configureProviders(providerCatalog, payload.settings?.visibleProviders);
+    closeDisplaySettings();
+    if (
+      (providerMeta[currentView] && !visibleProviderIds.has(currentView))
+      || (currentView === "forecast" && !forecastAgent)
+    ) {
+      currentView = "overview";
+      history.replaceState(null, "", "#overview");
+    }
+    await loadView(currentView);
+  } catch (error) {
+    setStatus(`保存显示设置失败：${error.message}`, "error");
+    els.displaySettingsSave.disabled = false;
+  }
 }
 
 function dismissedUpdateId() {
@@ -961,8 +1054,9 @@ function renderForecast(agent = forecastAgent) {
 }
 
 function setForecastAgent(agent) {
-  const fallback = providerCatalog.find((entry) => entry.forecast !== false)?.id;
-  forecastAgent = FORECAST_AGENT_META[agent] ? agent : fallback;
+  const candidates = visibleProviders().filter((entry) => entry.forecast !== false);
+  const fallback = candidates[0]?.id;
+  forecastAgent = candidates.some((entry) => entry.id === agent) ? agent : fallback;
   forecastTabElements().forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.forecastAgent === forecastAgent);
     tab.setAttribute("aria-selected", String(tab.dataset.forecastAgent === forecastAgent));
@@ -1162,7 +1256,7 @@ function renderMetrics(days, totals, view, bundle = {}) {
     renderMetric("今日总用量", formatCompact(latestTotal), `${dayDate(latest)} · ${formatCost(dayCost(latest))}`);
     renderMetric("累计 Token", formatCompact(totalTokenCount), `最近 30 条记录 ${formatCompact(recentTotal)}`);
     renderMetric("近 30 日费用", formatCost(recentCost), `累计估算 ${formatCost(totalCost)}`);
-    renderMetric("活跃来源", `${sourceCount || activeAgentCount(days)} 个`, providerCatalog.map((entry) => entry.shortLabel || entry.label).join(" / "));
+    renderMetric("活跃来源", `${sourceCount || activeAgentCount(days)} 个`, visibleProviders().map((entry) => entry.shortLabel || entry.label).join(" / "));
     return;
   }
 
@@ -1558,7 +1652,7 @@ function dayModels(day) {
 function mergeUsageSnapshots(bundle) {
   const byDay = new Map();
   const files = [];
-  for (const provider of providerCatalog) {
+  for (const provider of visibleProviders()) {
     const snapshot = bundle[provider.id] || {};
     for (const file of snapshot.files || []) files.push({ ...file, name: `${provider.shortLabel || provider.label} · ${file.name}` });
     for (const sourceDay of snapshot.daily || []) {
@@ -1595,7 +1689,7 @@ function mergeUsageSnapshots(bundle) {
     }
     return sum;
   }, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, totalCost: 0 });
-  const latestFiles = providerCatalog.map((provider) => bundle[provider.id]?.latestFile).filter(Boolean);
+  const latestFiles = visibleProviders().map((provider) => bundle[provider.id]?.latestFile).filter(Boolean);
   return {
     source: "overview",
     label: "全部智能体",
@@ -1609,7 +1703,7 @@ function mergeUsageSnapshots(bundle) {
 
 function renderOverviewSources(bundle) {
   els.sourceCompare.replaceChildren();
-  providerCatalog.forEach((provider) => {
+  visibleProviders().forEach((provider) => {
     const snapshot = bundle[provider.id];
     const summary = sourceSummary(snapshot);
     const node = document.createElement("article");
@@ -1645,8 +1739,8 @@ function renderSourceStatus(payload) {
       </div>
       <div class="source-status-lines">
         <span>${escapeHtml(source.command)}</span>
-        <span>${source.fileCount} files · ${source.dailyCount} daily rows</span>
-        <span>${source.quotaSnapshotCount || 0} daily quota files · ${source.quotaObservationCount || 0} reset-segment observations${source.quotaLatest ? ` · ${escapeHtml(source.quotaLatest.file?.name || "latest")}` : ""}</span>
+        <span>${source.fileCount} 个滚动账本 · ${source.dailyCount} 个日明细</span>
+        <span>${source.quotaFileCount || 0} 个额度文件 · ${source.quotaSnapshotCount || 0} 个日历史 · ${source.quotaObservationFileCount || 0} 个观测文件 · ${source.quotaObservationCount || 0} 个观测点${source.quotaLatest ? ` · ${escapeHtml(source.quotaLatest.file?.name || "latest")}` : ""}</span>
         <span title="${escapeHtml(source.primaryLogDir)}">${escapeHtml(source.primaryLogDir)}</span>
       </div>
     `;
@@ -1683,7 +1777,7 @@ function setViewVisibility(view) {
   const isSources = view === "sources";
   const isForecast = view === "forecast";
   const isUsageView = !isSources && !isForecast;
-  const showReset = view === "overview" || Boolean(providerMeta[view]?.resetCredits);
+  const showReset = (view === "overview" && visibleProviderIds.has("codex")) || Boolean(providerMeta[view]?.resetCredits);
   els.forecastView.classList.toggle("is-hidden", !isForecast);
   els.metricGrid.classList.toggle("is-hidden", isForecast);
   els.calendarHeatmapPanel.classList.toggle("is-hidden", view !== "overview");
@@ -1724,14 +1818,14 @@ async function loadSourcesView() {
   renderMetric("数据源", `${sources.length} 个`, `${providerCatalog.length} 个智能体 + 聚合来源`);
   renderMetric("已有快照", `${ready} 个`, "至少导出一次后显示");
   renderMetric("计划任务", "12:00", "默认每天中午导出");
-  renderMetric("存储位置", "项目内", "同一天刷新覆盖同名 JSON");
+  renderMetric("存储位置", "项目内", "滚动 JSON，Token 日账本永久保留");
   renderSourceStatus(data);
   setStatus(`已读取 ${sources.length} 个数据源状态`, "ok");
 }
 
 async function loadForecastView() {
   setStatus("正在读取用量与账户额度...");
-  const forecastProviders = providerCatalog.filter((entry) => entry.forecast !== false);
+  const forecastProviders = visibleProviders().filter((entry) => entry.forecast !== false);
   const results = await Promise.all(forecastProviders.map(async (provider) => {
     const [usage, quota] = await Promise.all([fetchUsage(provider.id), fetchQuota(provider.id)]);
     return [provider.id, usage, quota];
@@ -1745,7 +1839,9 @@ async function loadForecastView() {
 }
 
 async function loadView(view = currentView) {
-  currentView = VIEW_CONFIGS[view] ? view : "overview";
+  const hiddenProviderView = providerMeta[view] && !visibleProviderIds.has(view);
+  const unavailableForecast = view === "forecast" && !forecastAgent;
+  currentView = VIEW_CONFIGS[view] && !hiddenProviderView && !unavailableForecast ? view : "overview";
   const config = VIEW_CONFIGS[currentView];
   setActiveTab(currentView);
   setViewVisibility(currentView);
@@ -1764,7 +1860,7 @@ async function loadView(view = currentView) {
     setStatus(`正在读取 ${config.label} JSON...`);
 
     if (currentView === "overview") {
-      const entries = await Promise.all(providerCatalog.map(async (provider) => [provider.id, await fetchUsage(provider.id)]));
+      const entries = await Promise.all(visibleProviders().map(async (provider) => [provider.id, await fetchUsage(provider.id)]));
       const bundle = Object.fromEntries(entries);
       const overview = mergeUsageSnapshots(bundle);
       renderUsage(overview, "overview", bundle);
@@ -1811,7 +1907,16 @@ async function exportAndRefresh(scope = "current") {
 
     await loadView(currentView);
     if (data.partial) {
-      const failed = (data.results || []).filter((item) => !item.ok).map((item) => item.source).join(", ");
+      const failed = (data.results || [])
+        .filter((item) => !item.ok)
+        .map((item) => {
+          const error = String(item.error || item.warning || "");
+          if (item.source === "quota:claude" && /claude auth login/i.test(error)) {
+            return "quota:claude（需重新登录 Claude Code）";
+          }
+          return item.source;
+        })
+        .join(", ");
       setStatus(`部分导出完成，失败来源：${failed}`, "error");
     } else {
       setStatus(exportSource === "everything" ? "已导出并刷新全部数据源" : "已导出并刷新当前视图", "ok");
@@ -1842,6 +1947,17 @@ els.forecastAgentTabs.addEventListener("click", (event) => {
 els.refreshBtn.addEventListener("click", () => exportAndRefresh("everything"));
 els.exportBtn.addEventListener("click", () => exportAndRefresh("everything"));
 els.updateClose.addEventListener("click", () => hideUpdateBanner({ remember: true }));
+els.displaySettingsBtn.addEventListener("click", openDisplaySettings);
+els.displaySettingsClose.addEventListener("click", closeDisplaySettings);
+els.displaySettingsCancel.addEventListener("click", closeDisplaySettings);
+els.displaySettingsAll.addEventListener("click", () => {
+  els.providerSettingsList.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    input.checked = true;
+  });
+  updateDisplaySettingsCount();
+});
+els.providerSettingsList.addEventListener("change", updateDisplaySettingsCount);
+els.displaySettingsSave.addEventListener("click", saveDisplaySettings);
 
 async function bootstrap() {
   loadUpdateStatus();

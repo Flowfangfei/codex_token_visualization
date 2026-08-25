@@ -9,6 +9,7 @@ const {
   AUTO_EXPORT_SOURCES,
   publicProvider,
 } = require("./providers/registry.js");
+const { readDisplaySettings, writeDisplaySettings } = require("./lib/display-settings.js");
 const { checkForUpdate } = require("./lib/update-check.js");
 
 const ROOT = __dirname;
@@ -17,6 +18,7 @@ const CODEX_AUTH_PATH = process.env.CODEX_AUTH_PATH || path.join(os.homedir(), "
 const DEFAULT_PORT = 8787;
 const USAGE_LOG_ROOT = process.env.USAGE_LOG_ROOT || path.join(ROOT, "usage-logs");
 const FORECAST_SETTINGS_PATH = process.env.FORECAST_SETTINGS_PATH || path.join(USAGE_LOG_ROOT, "forecast-settings.json");
+const DISPLAY_SETTINGS_PATH = process.env.DISPLAY_SETTINGS_PATH || path.join(USAGE_LOG_ROOT, "display-settings.json");
 const QUOTA_SNAPSHOT_ROOT = process.env.QUOTA_SNAPSHOT_DIR || path.join(USAGE_LOG_ROOT, "quota-snapshots");
 const QUOTA_OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || path.join(USAGE_LOG_ROOT, "quota-observations");
 const FORECAST_AGENTS = PROVIDERS.filter((entry) => entry.forecast && entry.quota).map((entry) => entry.id);
@@ -294,17 +296,27 @@ function quotaSnapshots(source) {
   const observationLogDir = path.join(QUOTA_OBSERVATION_ROOT, source);
   const files = listJsonFiles(logDir);
   const daily = files
-    .map((file) => {
+    .flatMap((file) => {
       try {
-        const snapshot = JSON.parse(fs.readFileSync(file.path, "utf8").replace(/^\uFEFF/, ""));
-        return { ...snapshot, file: { name: file.name, modifiedAt: file.modifiedAt, size: file.size } };
+        const payload = JSON.parse(fs.readFileSync(file.path, "utf8").replace(/^\uFEFF/, ""));
+        const snapshots = Array.isArray(payload?.history)
+          ? payload.history
+          : payload?.latest && typeof payload.latest === "object"
+            ? [payload.latest]
+            : [payload];
+        return snapshots.map((snapshot) => ({
+          ...snapshot,
+          file: { name: file.name, modifiedAt: file.modifiedAt, size: file.size },
+        }));
       } catch (_) {
-        return null;
+        return [];
       }
     })
     .filter(Boolean)
     .sort((a, b) => new Date(a.fetchedAt || a.file.modifiedAt) - new Date(b.fetchedAt || b.file.modifiedAt));
-  const observations = listJsonFiles(observationLogDir)
+  const observationFiles = listJsonFiles(observationLogDir);
+  const observationMap = new Map();
+  observationFiles
     .flatMap((file) => {
       try {
         const payload = JSON.parse(fs.readFileSync(file.path, "utf8").replace(/^\uFEFF/, ""));
@@ -313,12 +325,26 @@ function quotaSnapshots(source) {
         return [];
       }
     })
+    .forEach((observation) => {
+      const key = [
+        observation?.windowName || "quota-window",
+        observation?.fetchedAt || "",
+        observation?.segment ?? "",
+        observation?.usedPercent ?? "",
+        observation?.totalTokens ?? "",
+        observation?.resetAt || "",
+      ].join("|");
+      observationMap.set(key, observation);
+    });
+  const observations = [...observationMap.values()]
     .sort((a, b) => new Date(a.fetchedAt || 0) - new Date(b.fetchedAt || 0));
 
   return {
     source,
     logDir,
     observationLogDir,
+    fileCount: files.length,
+    observationFileCount: observationFiles.length,
     latest: daily.at(-1) || null,
     daily,
     observations,
@@ -534,7 +560,7 @@ function runExport(req, res) {
         const quotaSync = await refreshAccountSnapshots();
         const quotaResults = (quotaSync.results || []).map((item) => ({
           ...item,
-          source: `quota:${item.source}`,
+          source: `${item.kind === "usage" ? "usage" : "quota"}:${item.source}`,
         }));
         const combinedResults = [...result.results, ...quotaResults];
         const succeeded = combinedResults.filter((item) => item.ok).length;
@@ -595,7 +621,9 @@ function sourceStatus() {
       latestFile: snapshot.latestFile,
       dailyCount: snapshot.daily.length,
       quotaLatest: quota?.latest || null,
+      quotaFileCount: quota?.fileCount || 0,
       quotaSnapshotCount: quota?.daily.length || 0,
+      quotaObservationFileCount: quota?.observationFileCount || 0,
       quotaObservationCount: quota?.observations.length || 0,
       detected,
       manualOnly: Boolean(config.manualOnly),
@@ -635,6 +663,28 @@ const server = http.createServer((req, res) => {
   try {
     if (req.method === "GET" && req.url.startsWith("/api/providers")) {
       sendJson(res, 200, { ok: true, providers: PROVIDERS.map(publicProvider) });
+      return;
+    }
+
+    if (req.url === "/api/display-settings") {
+      if (req.method === "GET") {
+        sendJson(res, 200, { ok: true, settings: readDisplaySettings(DISPLAY_SETTINGS_PATH, PROVIDERS) });
+        return;
+      }
+
+      if (req.method === "PUT") {
+        readJsonBody(req)
+          .then((payload) => sendJson(res, 200, {
+            ok: true,
+            settings: writeDisplaySettings(DISPLAY_SETTINGS_PATH, payload, PROVIDERS),
+          }))
+          .catch((error) => {
+            sendJson(res, error.statusCode || 400, { ok: false, error: error.message });
+          });
+        return;
+      }
+
+      sendJson(res, 405, { ok: false, error: "Method not allowed" });
       return;
     }
 

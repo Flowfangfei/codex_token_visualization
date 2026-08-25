@@ -9,6 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $ProviderConfigScript = Join-Path $PSScriptRoot "provider-config.mjs"
+$UsageStorageScript = Join-Path $PSScriptRoot "usage-storage.mjs"
 $ConfigBase64 = & node $ProviderConfigScript --source $Source --base64
 if ($LASTEXITCODE -ne 0 -or -not $ConfigBase64) {
   throw "No ccusage provider is registered for $Source"
@@ -36,11 +37,7 @@ if ($NodeMajor -lt 22) {
   throw "ccusage@latest requires Node.js 22 or newer. Current version: $NodeVersion"
 }
 
-if (-not $FileDate) {
-  $FileDate = Get-Date -Format "yyyy-MM-dd"
-}
-
-$OutputFile = Join-Path $DailyRoot "$($Config.filePrefix)-$FileDate.json"
+$OutputFile = Join-Path $DailyRoot "$($Config.filePrefix).json"
 $env:npm_config_cache = $NpmCache
 
 $ccusageArgs = @($Config.ccusageArgs) + @(
@@ -80,6 +77,29 @@ if ($LASTEXITCODE -ne 0) {
 $parsed = $json | ConvertFrom-Json
 $formattedJson = $parsed | ConvertTo-Json -Depth 100
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($OutputFile, $formattedJson, $utf8NoBom)
+$TemporaryFile = "$OutputFile.$PID.tmp"
+[System.IO.File]::WriteAllText($TemporaryFile, $formattedJson, $utf8NoBom)
+try {
+  $MergeArgs = @(
+    $UsageStorageScript,
+    "--output", $OutputFile,
+    "--prefix", [string]$Config.filePrefix,
+    "--incoming", $TemporaryFile,
+    "--root", $DailyRoot
+  )
+  foreach ($LegacyRoot in @($Config.legacyRoots)) {
+    if ($LegacyRoot) {
+      $MergeArgs += @("--root", [string]$LegacyRoot)
+    }
+  }
+  & node @MergeArgs | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "Usage history consolidation failed with exit code $LASTEXITCODE"
+  }
+} finally {
+  if (Test-Path -LiteralPath $TemporaryFile) {
+    Remove-Item -LiteralPath $TemporaryFile -Force
+  }
+}
 
 Write-Host "Done: $OutputFile"

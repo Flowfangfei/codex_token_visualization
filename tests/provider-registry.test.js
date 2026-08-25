@@ -1,10 +1,21 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { zstdCompressSync } = require("node:zlib");
 const registry = require("../providers/registry.js");
 
 test("public provider metadata excludes backend paths and adapters", () => {
   const publicEntries = registry.PROVIDERS.map(registry.publicProvider);
-  assert.deepEqual(publicEntries.map((entry) => entry.id), ["codex", "claude", "cursor", "kimi"]);
+  assert.deepEqual(publicEntries.map((entry) => entry.id), [
+    "codex",
+    "claude",
+    "cursor",
+    "kimi",
+    "opencode",
+    "deepseek-harness",
+  ]);
   for (const entry of publicEntries) {
     assert.equal("usage" in entry, false);
     assert.equal("quota" in entry, false);
@@ -17,6 +28,238 @@ test("automatic refresh excludes the redundant aggregate ccusage scan", () => {
   assert.deepEqual(registry.AUTO_EXPORT_SOURCES.map((entry) => entry.id), ["codex", "claude"]);
   assert.equal(registry.AGGREGATE_PROVIDER.usage.autoExport, false);
   assert.deepEqual(registry.AGGREGATE_PROVIDER.usage.ccusageArgs, ["daily"]);
+});
+
+test("DeepSeek Harness concatenated Zstandard frames decode without exposing message content", async () => {
+  const { decodeDeepSeekHarnessSessionBuffer, scanZstdFrameRanges } = await import("../scripts/sync-account-quotas.mjs");
+  const first = zstdCompressSync(`${JSON.stringify({
+    type: "session",
+    id: "must-not-survive",
+    createdAt: new Date(2026, 7, 13, 9, 0).getTime(),
+  })}\n${JSON.stringify({
+    type: "request/context",
+    time: new Date(2026, 7, 13, 9, 1).getTime(),
+    data: { provider: "deepseek-official", model: "deepseek-v4-pro", contextWindow: 128000 },
+  })}\n`);
+  const second = zstdCompressSync(`${JSON.stringify({
+    type: "assistant/chunk",
+    time: new Date(2026, 7, 13, 9, 2).getTime(),
+    data: { turn: 1, step: 1, chunk: { type: "usage", usage: { inputTokens: 10, outputTokens: 5 } } },
+  })}\n`);
+  const unfinished = zstdCompressSync(`${JSON.stringify({ type: "turn/end", data: { reason: "done" } })}\n`);
+  const buffer = Buffer.concat([first, second, unfinished.subarray(0, Math.floor(unfinished.length / 2))]);
+
+  const scan = scanZstdFrameRanges(buffer);
+  assert.equal(scan.frames.length, 2);
+  assert.equal(typeof scan.tornStart, "number");
+  const decoded = decodeDeepSeekHarnessSessionBuffer(buffer);
+  assert.equal(decoded.frames, 2);
+  assert.equal(decoded.tornFrame, true);
+  assert.deepEqual(decoded.events.map((event) => event.type), [
+    "session",
+    "request/context",
+    "assistant/chunk",
+  ]);
+  assert.equal(JSON.stringify(decoded).includes("must-not-survive"), false);
+});
+
+test("DeepSeek Harness final usage replaces stream usage and excludes other routes", async () => {
+  const { aggregateDeepSeekHarnessEvents } = await import("../scripts/sync-account-quotas.mjs");
+  const morning = new Date(2026, 7, 13, 9, 0).getTime();
+  const snapshot = aggregateDeepSeekHarnessEvents([[
+    { type: "session", createdAt: morning },
+    { type: "request/context", route: { provider: "deepseek-official", model: "deepseek-v4-pro" } },
+    {
+      type: "assistant/chunk",
+      key: "1:1",
+      time: morning,
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        reasoningOutputTokens: 2,
+        cacheReadTokens: 20,
+        cacheCreationTokens: 1,
+        totalTokens: 36,
+        totalCost: 0,
+      },
+    },
+    {
+      type: "assistant/message",
+      key: "1:1",
+      time: morning + 1000,
+      route: { provider: "deepseek-official", model: "deepseek-v4-pro" },
+      usage: {
+        inputTokens: 12,
+        outputTokens: 6,
+        reasoningOutputTokens: 3,
+        cacheReadTokens: 20,
+        cacheCreationTokens: 1,
+        totalTokens: 39,
+        totalCost: 0,
+      },
+    },
+    { type: "request/context", route: { provider: "openai", model: "gpt-5.5" } },
+    {
+      type: "assistant/chunk",
+      key: "1:2",
+      time: morning + 2000,
+      usage: {
+        inputTokens: 999,
+        outputTokens: 999,
+        reasoningOutputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 1998,
+        totalCost: 0,
+      },
+    },
+  ]], "2026-08-13T01:00:00.000Z");
+
+  assert.equal(snapshot.provider, "deepseek-harness-session-zstd");
+  assert.equal(snapshot.recordCount, 1);
+  assert.equal(snapshot.daily.length, 1);
+  assert.equal(snapshot.daily[0].totalTokens, 39);
+  assert.equal(snapshot.daily[0].reasoningOutputTokens, 3);
+  assert.equal(snapshot.daily[0].modelBreakdowns[0].modelName, "deepseek-official/deepseek-v4-pro");
+});
+
+test("OpenCode assistant messages aggregate by day and provider-qualified model", async () => {
+  const { aggregateOpenCodeUsageRecords } = await import("../scripts/sync-account-quotas.mjs");
+  const snapshot = aggregateOpenCodeUsageRecords([
+    {
+      date: "2026-08-06",
+      modelName: "deepseek/deepseek-v4-flash",
+      inputTokens: 120,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+      cacheReadTokens: 400,
+      cacheCreationTokens: 20,
+      totalTokens: 580,
+      totalCost: 0.01,
+    },
+    {
+      date: "2026-08-06",
+      modelName: "anthropic/claude-sonnet-4-5",
+      inputTokens: 80,
+      outputTokens: 20,
+      reasoningOutputTokens: 0,
+      cacheReadTokens: 100,
+      cacheCreationTokens: 0,
+      totalTokens: 200,
+      totalCost: 0.02,
+    },
+  ], "2026-08-06T08:00:00.000Z");
+
+  assert.equal(snapshot.provider, "opencode-sqlite");
+  assert.equal(snapshot.recordCount, 2);
+  assert.equal(snapshot.daily.length, 1);
+  assert.equal(snapshot.daily[0].totalTokens, 780);
+  assert.equal(snapshot.daily[0].cacheReadTokens, 500);
+  assert.equal(snapshot.totals.totalCost, 0.03);
+  assert.deepEqual(snapshot.daily[0].modelsUsed, [
+    "deepseek/deepseek-v4-flash",
+    "anthropic/claude-sonnet-4-5",
+  ]);
+});
+
+test("Codex quota sync prefers the npm CLI shim over an inaccessible packaged executable", async () => {
+  const { codexAppServerInvocation, resolveCodexCliPath } = await import("../scripts/sync-account-quotas.mjs");
+  const npmShim = "C:\\Users\\example\\AppData\\Roaming\\npm\\codex.cmd";
+  const env = {
+    APPDATA: "C:\\Users\\example\\AppData\\Roaming",
+    CODEX_CLI_PATH: "C:\\stale\\codex.exe",
+    PATH: "C:\\Program Files\\WindowsApps\\OpenAI.Codex\\resources;C:\\Users\\example\\AppData\\Roaming\\npm",
+  };
+  const options = { platform: "win32", env, pathExists: (candidate) => candidate === npmShim };
+
+  assert.equal(resolveCodexCliPath(options), npmShim);
+  assert.deepEqual(codexAppServerInvocation(options), {
+    command: "powershell.exe",
+    args: ["-NoProfile", "-NonInteractive", "-Command", `& '${npmShim}' app-server --stdio`],
+  });
+});
+
+test("Codex quota sync supports an explicit CLI path override", async () => {
+  const { resolveCodexCliPath } = await import("../scripts/sync-account-quotas.mjs");
+  assert.equal(resolveCodexCliPath({
+    platform: "win32",
+    env: { CODEX_CLI_PATH: "D:\\tools\\codex.exe" },
+    pathExists: (candidate) => candidate === "D:\\tools\\codex.exe",
+  }), "D:\\tools\\codex.exe");
+});
+
+test("Claude OAuth refresh rotates credentials without dropping unrelated fields", async () => {
+  const { refreshClaudeCredential } = await import("../scripts/sync-account-quotas.mjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "token-ledger-claude-"));
+  const credentialPath = path.join(directory, ".credentials.json");
+  const original = {
+    retainedRootField: { enabled: true },
+    claudeAiOauth: {
+      accessToken: "old-access",
+      refreshToken: "old-refresh",
+      expiresAt: 1,
+      scopes: ["user:profile"],
+      subscriptionType: "max",
+    },
+  };
+  fs.writeFileSync(credentialPath, JSON.stringify(original), "utf8");
+
+  try {
+    let request = null;
+    const refreshed = await refreshClaudeCredential(original, {
+      credentialPath,
+      now: 1_000_000,
+      fetchImpl: async (url, options) => {
+        request = { url, body: JSON.parse(options.body) };
+        return new Response(JSON.stringify({
+          access_token: "new-access",
+          refresh_token: "new-refresh",
+          expires_in: 3600,
+          scope: "user:profile user:inference",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+    const persisted = JSON.parse(fs.readFileSync(credentialPath, "utf8"));
+
+    assert.equal(request.url, "https://platform.claude.com/v1/oauth/token");
+    assert.deepEqual(request.body, {
+      grant_type: "refresh_token",
+      refresh_token: "old-refresh",
+      client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+      scope: "user:profile",
+    });
+    assert.deepEqual(persisted.retainedRootField, { enabled: true });
+    assert.equal(persisted.claudeAiOauth.subscriptionType, "max");
+    assert.equal(persisted.claudeAiOauth.accessToken, "new-access");
+    assert.equal(persisted.claudeAiOauth.refreshToken, "new-refresh");
+    assert.equal(persisted.claudeAiOauth.expiresAt, 4_600_000);
+    assert.deepEqual(refreshed.claudeAiOauth.scopes, ["user:profile", "user:inference"]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Claude OAuth refresh adopts credentials rotated by another process", async () => {
+  const { refreshClaudeCredential } = await import("../scripts/sync-account-quotas.mjs");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "token-ledger-claude-race-"));
+  const credentialPath = path.join(directory, ".credentials.json");
+  const original = { claudeAiOauth: { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: 1 } };
+  const rotated = { claudeAiOauth: { accessToken: "other-access", refreshToken: "other-refresh", expiresAt: Date.now() + 3600000 } };
+  fs.writeFileSync(credentialPath, JSON.stringify(original), "utf8");
+
+  try {
+    const result = await refreshClaudeCredential(original, {
+      credentialPath,
+      fetchImpl: async () => {
+        fs.writeFileSync(credentialPath, JSON.stringify(rotated), "utf8");
+        return new Response("{}", { status: 400, headers: { "content-type": "application/json" } });
+      },
+    });
+    assert.deepEqual(result, rotated);
+    assert.deepEqual(JSON.parse(fs.readFileSync(credentialPath, "utf8")), rotated);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("Kimi wire records aggregate only turn-scoped token events", async () => {

@@ -2,10 +2,12 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { arch, homedir, hostname, release, type } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve, win32 as pathWin32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import { zstdDecompressSync } from "node:zlib";
 import providerRegistry from "../providers/registry.js";
+import { writeConsolidatedUsageSnapshot } from "./usage-storage.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const USAGE_ROOT = process.env.USAGE_LOG_ROOT || join(ROOT, "usage-logs");
@@ -14,7 +16,13 @@ const QUOTA_ROOT = process.env.QUOTA_SNAPSHOT_DIR || join(USAGE_ROOT, "quota-sna
 const OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || join(USAGE_ROOT, "quota-observations");
 const PROVIDERS = providerRegistry.PROVIDERS;
 const PROVIDER_BY_ID = new Map(PROVIDERS.map((entry) => [entry.id, entry]));
-const SOURCES = PROVIDERS.filter((entry) => entry.forecast && entry.quota).map((entry) => entry.id);
+const MANAGED_USAGE_ADAPTER_IDS = new Set(["opencode-sqlite", "deepseek-harness-zstd"]);
+const SOURCES = PROVIDERS
+  .filter((entry) => entry.quota || MANAGED_USAGE_ADAPTER_IDS.has(entry.usage?.adapter))
+  .map((entry) => entry.id);
+const STORAGE_RETENTION_DAYS = 120;
+const MAX_DAILY_QUOTA_SNAPSHOTS = 180;
+const MAX_QUOTA_OBSERVATIONS = STORAGE_RETENTION_DAYS * 96;
 
 function localDateKey(date = new Date()) {
   const pad = (value) => String(value).padStart(2, "0");
@@ -23,6 +31,454 @@ function localDateKey(date = new Date()) {
 
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+}
+
+function writeJsonAtomic(filePath, value) {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  renameSync(temporaryPath, filePath);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function removeLegacyDatedFiles(logDir, prefix, { exclude = null } = {}) {
+  if (!existsSync(logDir)) return;
+  const pattern = new RegExp(`^${escapeRegExp(prefix)}-\\d{4}-\\d{2}-\\d{2}\\.json$`, "i");
+  for (const name of readdirSync(logDir)) {
+    const filePath = join(logDir, name);
+    if (filePath !== exclude && pattern.test(name)) unlinkSync(filePath);
+  }
+}
+
+function openCodeDatabasePath() {
+  return process.env.OPENCODE_DB_PATH || join(homedir(), ".local", "share", "opencode", "opencode.db");
+}
+
+function openCodeDateKey(value) {
+  const timestamp = Number(value);
+  const date = Number.isFinite(timestamp) ? new Date(timestamp) : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : localDateKey(date);
+}
+
+function openCodeUsageRecord(row) {
+  let data;
+  try {
+    data = typeof row?.data === "string" ? JSON.parse(row.data) : row?.data;
+  } catch (_) {
+    return null;
+  }
+  if (data?.role !== "assistant" || !data?.tokens) return null;
+
+  const inputTokens = Math.max(0, numberOrZero(data.tokens.input));
+  const outputTokens = Math.max(0, numberOrZero(data.tokens.output));
+  const reasoningOutputTokens = Math.max(0, numberOrZero(data.tokens.reasoning));
+  const cacheReadTokens = Math.max(0, numberOrZero(data.tokens.cache?.read));
+  const cacheCreationTokens = Math.max(0, numberOrZero(data.tokens.cache?.write));
+  const calculatedTotal = inputTokens + outputTokens + reasoningOutputTokens + cacheReadTokens + cacheCreationTokens;
+  const totalTokens = Math.max(calculatedTotal, numberOrZero(data.tokens.total));
+  const date = openCodeDateKey(data.time?.created ?? row.time_created);
+  if (!date) return null;
+
+  const modelID = String(data.modelID || "unknown");
+  const providerID = String(data.providerID || "opencode");
+  return {
+    date,
+    modelName: `${providerID}/${modelID}`,
+    inputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    totalTokens,
+    totalCost: Math.max(0, numberOrZero(data.cost)),
+  };
+}
+
+function openCodeSessionRecord(row) {
+  const date = openCodeDateKey(row?.time_created);
+  if (!date) return null;
+  let model = row?.model;
+  try {
+    model = typeof model === "string" ? JSON.parse(model) : model;
+  } catch (_) {
+    model = null;
+  }
+  const inputTokens = Math.max(0, numberOrZero(row?.tokens_input));
+  const outputTokens = Math.max(0, numberOrZero(row?.tokens_output));
+  const reasoningOutputTokens = Math.max(0, numberOrZero(row?.tokens_reasoning));
+  const cacheReadTokens = Math.max(0, numberOrZero(row?.tokens_cache_read));
+  const cacheCreationTokens = Math.max(0, numberOrZero(row?.tokens_cache_write));
+  return {
+    date,
+    modelName: `${model?.providerID || "opencode"}/${model?.id || "unknown"}`,
+    inputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    totalTokens: inputTokens + outputTokens + reasoningOutputTokens + cacheReadTokens + cacheCreationTokens,
+    totalCost: Math.max(0, numberOrZero(row?.cost)),
+  };
+}
+
+export function aggregateOpenCodeUsageRecords(records, generatedAt = new Date().toISOString()) {
+  const fields = [
+    "inputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+    "cacheReadTokens",
+    "cacheCreationTokens",
+    "totalTokens",
+    "totalCost",
+  ];
+  const byDay = new Map();
+
+  for (const record of records || []) {
+    if (!record?.date) continue;
+    const day = byDay.get(record.date) || {
+      date: record.date,
+      inputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      totalTokens: 0,
+      totalCost: 0,
+      models: new Map(),
+    };
+    for (const field of fields) day[field] += numberOrZero(record[field]);
+    const model = day.models.get(record.modelName) || Object.fromEntries(fields.map((field) => [field, 0]));
+    for (const field of fields) model[field] += numberOrZero(record[field]);
+    day.models.set(record.modelName, model);
+    byDay.set(record.date, day);
+  }
+
+  const daily = [...byDay.values()]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((day) => ({
+      ...Object.fromEntries(fields.map((field) => [field, day[field]])),
+      date: day.date,
+      modelsUsed: [...day.models.keys()],
+      modelBreakdowns: [...day.models.entries()]
+        .map(([modelName, usage]) => ({ modelName, ...usage }))
+        .sort((a, b) => b.totalTokens - a.totalTokens),
+    }));
+  const totals = Object.fromEntries(fields.map((field) => [field, daily.reduce((sum, day) => sum + numberOrZero(day[field]), 0)]));
+
+  return {
+    source: "opencode",
+    generatedAt,
+    provider: "opencode-sqlite",
+    recordCount: records?.length || 0,
+    daily,
+    totals,
+  };
+}
+
+export function readOpenCodeUsage(databasePath = openCodeDatabasePath()) {
+  if (!existsSync(databasePath)) throw new Error("OpenCode database was not found");
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const tableNames = new Set(database.prepare("select name from sqlite_master where type = 'table'").all().map((row) => row.name));
+    let records = [];
+    let recordSource = "message";
+    if (tableNames.has("message")) {
+      records = database.prepare("select time_created, data from message order by time_created")
+        .all()
+        .map(openCodeUsageRecord)
+        .filter(Boolean);
+    }
+    if (!records.length && tableNames.has("session")) {
+      recordSource = "session-fallback";
+      records = database.prepare(`
+        select model, cost, tokens_input, tokens_output, tokens_reasoning,
+               tokens_cache_read, tokens_cache_write, time_created
+        from session order by time_created
+      `).all().map(openCodeSessionRecord).filter(Boolean);
+    }
+    return { ...aggregateOpenCodeUsageRecords(records), recordSource };
+  } finally {
+    database.close();
+  }
+}
+
+const ZSTD_MAGIC = 0xFD2FB528;
+
+export function scanZstdFrameRanges(buffer) {
+  const frames = [];
+  let offset = 0;
+
+  while (offset < buffer.length) {
+    const start = offset;
+    if (buffer.length - offset < 4) return { frames, tornStart: start };
+    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) {
+      throw new Error(`Invalid Zstandard frame magic at byte ${offset}`);
+    }
+    offset += 4;
+
+    if (offset === buffer.length) return { frames, tornStart: start };
+    const descriptor = buffer.readUInt8(offset);
+    offset += 1;
+    if ((descriptor & 0x18) !== 0) {
+      throw new Error(`Invalid Zstandard frame descriptor at byte ${offset - 1}`);
+    }
+
+    const contentSizeFlag = descriptor >>> 6;
+    const singleSegment = (descriptor & 0x20) !== 0;
+    const checksum = (descriptor & 0x04) !== 0;
+    const dictionaryFlag = descriptor & 0x03;
+    const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag;
+    const contentSizeBytes = contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentSizeFlag;
+    const remainingHeaderBytes = (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes;
+    if (buffer.length - offset < remainingHeaderBytes) return { frames, tornStart: start };
+    offset += remainingHeaderBytes;
+
+    for (;;) {
+      if (buffer.length - offset < 3) return { frames, tornStart: start };
+      const blockHeader = buffer.readUIntLE(offset, 3);
+      offset += 3;
+      const lastBlock = (blockHeader & 1) !== 0;
+      const blockType = (blockHeader >>> 1) & 0x03;
+      const blockSize = blockHeader >>> 3;
+      if (blockType === 0x03) throw new Error(`Invalid Zstandard block type at byte ${offset - 3}`);
+      const payloadBytes = blockType === 0x01 ? 1 : blockSize;
+      if (buffer.length - offset < payloadBytes) return { frames, tornStart: start };
+      offset += payloadBytes;
+      if (lastBlock) break;
+    }
+
+    if (checksum) {
+      if (buffer.length - offset < 4) return { frames, tornStart: start };
+      offset += 4;
+    }
+    frames.push({ start, end: offset });
+  }
+
+  return { frames };
+}
+
+function deepSeekHarnessRoute(value) {
+  const provider = typeof value?.provider === "string" ? value.provider.trim() : "";
+  const model = typeof value?.model === "string" ? value.model.trim() : "";
+  return provider && model ? { provider, model } : null;
+}
+
+function deepSeekHarnessUsage(value) {
+  if (!value || typeof value !== "object") return null;
+  const inputTokens = Math.max(0, numberOrZero(value.inputTokens));
+  const outputTokens = Math.max(0, numberOrZero(value.outputTokens));
+  const reasoningOutputTokens = Math.max(0, numberOrZero(value.reasoningTokens));
+  const cacheReadTokens = Math.max(0, numberOrZero(value.cacheReadTokens));
+  const cacheCreationTokens = Math.max(0, numberOrZero(value.cacheWriteTokens));
+  return {
+    inputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens,
+    totalCost: 0,
+  };
+}
+
+function deepSeekHarnessDate(value, fallback) {
+  const candidate = value ?? fallback;
+  if (candidate === null || candidate === undefined || candidate === "") return null;
+  const timestamp = Number(candidate);
+  const date = Number.isFinite(timestamp) ? new Date(timestamp) : new Date(candidate);
+  return Number.isNaN(date.getTime()) ? null : localDateKey(date);
+}
+
+function deepSeekHarnessStepKey(data) {
+  const turn = Number(data?.turn);
+  const step = Number(data?.step);
+  return Number.isInteger(turn) && Number.isInteger(step) ? `${turn}:${step}` : null;
+}
+
+function sanitizedDeepSeekHarnessEvent(record) {
+  if (!record || typeof record !== "object") return null;
+  if (record.type === "session") {
+    return { type: "session", createdAt: record.createdAt };
+  }
+  if (record.type === "request/header") {
+    const route = deepSeekHarnessRoute(record.data?.header?.config);
+    return route ? { type: record.type, time: record.time, route } : null;
+  }
+  if (record.type === "request/context") {
+    const route = deepSeekHarnessRoute(record.data);
+    return route ? { type: record.type, time: record.time, route } : null;
+  }
+  if (record.type === "assistant/chunk" && record.data?.chunk?.type === "usage") {
+    const key = deepSeekHarnessStepKey(record.data);
+    const usage = deepSeekHarnessUsage(record.data.chunk.usage);
+    return key && usage ? { type: record.type, time: record.time, key, usage } : null;
+  }
+  if (record.type === "assistant/message") {
+    const key = deepSeekHarnessStepKey(record.data);
+    if (!key) return null;
+    return {
+      type: record.type,
+      time: record.time,
+      key,
+      route: deepSeekHarnessRoute(record.data?.message?.source),
+      usage: deepSeekHarnessUsage(record.data?.usage),
+    };
+  }
+  return null;
+}
+
+function parseDeepSeekHarnessJsonl(text, events, stats) {
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = sanitizedDeepSeekHarnessEvent(JSON.parse(line));
+      if (event) events.push(event);
+    } catch (_) {
+      stats.invalidLines += 1;
+    }
+  }
+}
+
+export function decodeDeepSeekHarnessSessionBuffer(buffer, { compressed = true } = {}) {
+  const events = [];
+  const stats = { frames: 0, tornFrame: false, invalidLines: 0 };
+  if (!compressed) {
+    parseDeepSeekHarnessJsonl(buffer.toString("utf8"), events, stats);
+    return { events, ...stats };
+  }
+
+  const scan = scanZstdFrameRanges(buffer);
+  stats.frames = scan.frames.length;
+  stats.tornFrame = scan.tornStart !== undefined;
+  let pending = "";
+  for (const frame of scan.frames) {
+    const text = pending + zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString("utf8");
+    const lines = text.split(/\r?\n/);
+    pending = lines.pop() || "";
+    parseDeepSeekHarnessJsonl(lines.join("\n"), events, stats);
+  }
+  if (pending.trim()) parseDeepSeekHarnessJsonl(pending, events, stats);
+  return { events, ...stats };
+}
+
+function deepSeekHarnessSessionFiles(root) {
+  const files = [];
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop();
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(entryPath);
+      else if (entry.isFile() && (entry.name === "session.jsonl.zstd" || entry.name === "session.jsonl")) {
+        files.push(entryPath);
+      }
+    }
+  }
+  return files.sort();
+}
+
+export function aggregateDeepSeekHarnessEvents(
+  sessions,
+  generatedAt = new Date().toISOString(),
+  { providerIds = ["deepseek", "deepseek-official"], sourceStats = {} } = {},
+) {
+  const allowedProviders = new Set(providerIds.map((value) => String(value).trim().toLowerCase()).filter(Boolean));
+  const records = [];
+
+  for (const events of sessions || []) {
+    const steps = new Map();
+    let route = null;
+    let sessionTime = null;
+    for (const event of events || []) {
+      if (event.type === "session") {
+        sessionTime = event.createdAt;
+        continue;
+      }
+      if (event.type === "request/header" || event.type === "request/context") {
+        route = event.route;
+        continue;
+      }
+      if (event.type === "assistant/chunk") {
+        steps.set(event.key, {
+          route,
+          date: deepSeekHarnessDate(event.time, sessionTime),
+          usage: event.usage,
+        });
+        continue;
+      }
+      if (event.type === "assistant/message") {
+        const previous = steps.get(event.key);
+        if (!previous && !event.usage) continue;
+        steps.set(event.key, {
+          route: event.route || previous?.route || route,
+          date: deepSeekHarnessDate(event.time, sessionTime) || previous?.date || null,
+          usage: event.usage || previous?.usage,
+        });
+      }
+    }
+
+    for (const step of steps.values()) {
+      const providerId = String(step.route?.provider || "").toLowerCase();
+      if (!step.date || !step.usage || !allowedProviders.has(providerId)) continue;
+      records.push({
+        date: step.date,
+        modelName: `${step.route.provider}/${step.route.model}`,
+        ...step.usage,
+      });
+    }
+  }
+
+  const snapshot = aggregateOpenCodeUsageRecords(records, generatedAt);
+  return {
+    ...snapshot,
+    source: "deepseek-harness",
+    provider: "deepseek-harness-session-zstd",
+    recordCount: records.length,
+    providerFilter: [...allowedProviders],
+    ...sourceStats,
+  };
+}
+
+export function readDeepSeekHarnessUsage(provider) {
+  const sessionRoot = provider?.usage?.sessionRoot
+    || process.env.DEEPSEEK_HARNESS_SESSION_ROOT
+    || join(process.env.DEEPSEEK_HARNESS_HOME || "D:\\deepseek-harness\\.dsh-home", "sessions");
+  if (!existsSync(sessionRoot)) throw new Error("DeepSeek Harness session directory was not found");
+
+  const files = deepSeekHarnessSessionFiles(sessionRoot);
+  if (!files.length) throw new Error("DeepSeek Harness has no session logs");
+  const sessions = [];
+  const sourceStats = {
+    scannedFiles: files.length,
+    decodedFiles: 0,
+    unreadableFiles: 0,
+    decodedFrames: 0,
+    tornFiles: 0,
+    invalidLines: 0,
+  };
+  for (const filePath of files) {
+    try {
+      const decoded = decodeDeepSeekHarnessSessionBuffer(readFileSync(filePath), {
+        compressed: filePath.endsWith(".zstd"),
+      });
+      if (!decoded.events.length) throw new Error("DeepSeek Harness session log has no decodable events");
+      sessions.push(decoded.events);
+      sourceStats.decodedFiles += 1;
+      sourceStats.decodedFrames += decoded.frames;
+      sourceStats.tornFiles += decoded.tornFrame ? 1 : 0;
+      sourceStats.invalidLines += decoded.invalidLines;
+    } catch (_) {
+      sourceStats.unreadableFiles += 1;
+    }
+  }
+  if (!sourceStats.decodedFiles) throw new Error("DeepSeek Harness session logs could not be decoded");
+  return aggregateDeepSeekHarnessEvents(sessions, new Date().toISOString(), {
+    providerIds: provider?.usage?.providerIds,
+    sourceStats,
+  });
 }
 
 function readSettings() {
@@ -64,7 +520,34 @@ function safeError(error) {
   return String(error?.message || error || "Unknown error")
     .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]")
     .replace(/WorkosCursorSessionToken=[^;\s]+/gi, "WorkosCursorSessionToken=[redacted]")
+    .replace(/(["']?(?:(?:access|refresh|id)[_-]?token|cookie)["']?\s*[=:]\s*)["']?[^"',;\s}]+/gi, "$1[redacted]")
     .slice(0, 220);
+}
+
+export function resolveCodexCliPath({ platform = process.platform, env = process.env, pathExists = existsSync } = {}) {
+  const configuredPath = String(env.CODEX_CLI_PATH || "").trim();
+  if (configuredPath && pathExists(configuredPath)) return configuredPath;
+  if (platform !== "win32") return "codex";
+
+  const candidates = [];
+  if (env.APPDATA) candidates.push(pathWin32.join(env.APPDATA, "npm", "codex.cmd"));
+  for (const directory of String(env.PATH || "").split(platform === "win32" ? ";" : delimiter).filter(Boolean)) {
+    candidates.push(pathWin32.join(directory.replace(/^"|"$/g, ""), "codex.cmd"));
+  }
+  return candidates.find((candidate) => pathExists(candidate)) || "codex";
+}
+
+export function codexAppServerInvocation(options = {}) {
+  const platform = options.platform || process.platform;
+  const cliPath = resolveCodexCliPath({ ...options, platform });
+  if (platform === "win32" && /\.(?:cmd|bat)$/i.test(cliPath)) {
+    const escapedPath = cliPath.replace(/'/g, "''");
+    return {
+      command: "powershell.exe",
+      args: ["-NoProfile", "-NonInteractive", "-Command", `& '${escapedPath}' app-server --stdio`],
+    };
+  }
+  return { command: cliPath, args: ["app-server", "--stdio"] };
 }
 
 function codexWindow(name, value) {
@@ -99,13 +582,10 @@ function terminateChildProcessTree(child) {
 
 function fetchCodexQuota() {
   return new Promise((resolvePromise, rejectPromise) => {
-    const isWindows = process.platform === "win32";
-    const command = isWindows ? "powershell.exe" : "sh";
-    const args = isWindows
-      ? ["-NoProfile", "-Command", "codex app-server --stdio"]
-      : ["-lc", "codex app-server --stdio"];
+    const { command, args } = codexAppServerInvocation();
     const child = spawn(command, args, { cwd: ROOT, windowsHide: true });
     let buffer = "";
+    let stderr = "";
     let finished = false;
     const finish = (error, value) => {
       if (finished) return;
@@ -159,9 +639,16 @@ function fetchCodexQuota() {
         }
       }
     });
+    child.stderr.on("data", (chunk) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(-4096);
+    });
     child.on("error", (error) => finish(error));
     child.on("close", (code) => {
-      if (!finished) finish(new Error(`Codex account quota process exited (${code ?? "unknown"})`));
+      if (!finished) {
+        const detail = safeError(stderr.trim());
+        const suffix = detail ? `: ${detail}` : "";
+        finish(new Error(`Codex account quota process exited (${code ?? "unknown"})${suffix}`));
+      }
     });
     send({
       method: "initialize",
@@ -227,23 +714,162 @@ export function normalizeClaudeUsagePayload(payload, quotaConfig = {}) {
     .filter(Boolean);
 }
 
-async function fetchClaudeQuota(provider) {
-  const credentialPath = join(homedir(), ".claude", ".credentials.json");
-  if (!existsSync(credentialPath)) throw new Error("Claude OAuth credentials were not found");
-  const credentials = readJson(credentialPath);
+const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_TOKEN_URLS = [
+  "https://platform.claude.com/v1/oauth/token",
+  "https://console.anthropic.com/v1/oauth/token",
+];
+
+function claudeCredentialPath() {
+  return process.env.CLAUDE_CREDENTIAL_PATH || join(homedir(), ".claude", ".credentials.json");
+}
+
+function claudeOauthFrom(credentials) {
   const oauth = credentials?.claudeAiOauth;
-  const accessToken = oauth?.accessToken;
-  if (typeof accessToken !== "string" || !accessToken) throw new Error("Claude OAuth access token was not found");
+  if (!oauth || typeof oauth !== "object") throw new Error("Claude OAuth credentials were not found; run claude auth login");
+  return oauth;
+}
+
+function claudeTokenExpiresSoon(oauth, now = Date.now()) {
+  const rawExpiry = Number(oauth?.expiresAt);
+  if (!Number.isFinite(rawExpiry) || rawExpiry <= 0) return false;
+  const expiresAt = rawExpiry > 1e12 ? rawExpiry : rawExpiry * 1000;
+  return expiresAt <= now + 5 * 60 * 1000;
+}
+
+function claudeRequestHeaders(accessToken) {
+  return {
+    authorization: `Bearer ${accessToken}`,
+    accept: "application/json",
+    "anthropic-beta": "oauth-2025-04-20",
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "x-app": "cli",
+  };
+}
+
+async function fetchClaudeUsage(accessToken, fetchImpl = fetch) {
+  return fetchImpl(CLAUDE_USAGE_URL, {
+    headers: claudeRequestHeaders(accessToken),
+    signal: AbortSignal.timeout(12000),
+  });
+}
+
+function readClaudeCredentials(credentialPath = claudeCredentialPath()) {
+  if (!existsSync(credentialPath)) throw new Error("Claude OAuth credentials were not found; run claude auth login");
+  return readJson(credentialPath);
+}
+
+function rotatedClaudeCredentials(credentialPath, expectedOauth) {
+  try {
+    const latest = readClaudeCredentials(credentialPath);
+    const latestOauth = claudeOauthFrom(latest);
+    const accessChanged = latestOauth.accessToken && latestOauth.accessToken !== expectedOauth.accessToken;
+    const refreshChanged = latestOauth.refreshToken && latestOauth.refreshToken !== expectedOauth.refreshToken;
+    return accessChanged || refreshChanged ? latest : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function waitForRotatedClaudeCredentials(credentialPath, expectedOauth) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const rotated = rotatedClaudeCredentials(credentialPath, expectedOauth);
+    if (rotated) return rotated;
+    if (attempt < 4) await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+  }
+  return null;
+}
+
+export async function refreshClaudeCredential(credentials, options = {}) {
+  const credentialPath = options.credentialPath || claudeCredentialPath();
+  const fetchImpl = options.fetchImpl || fetch;
+  const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+  const oauth = claudeOauthFrom(credentials);
+  const refreshToken = oauth.refreshToken;
+  if (typeof refreshToken !== "string" || !refreshToken) {
+    throw new Error("Claude OAuth token expired and no refresh token is available; run claude auth login");
+  }
+
+  const body = {
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    client_id: CLAUDE_OAUTH_CLIENT_ID,
+  };
+  if (Array.isArray(oauth.scopes) && oauth.scopes.length) body.scope = oauth.scopes.join(" ");
+
+  let response = null;
+  for (let index = 0; index < CLAUDE_TOKEN_URLS.length; index += 1) {
+    const tokenUrl = CLAUDE_TOKEN_URLS[index];
+    try {
+      response = await fetchImpl(tokenUrl, {
+        method: "POST",
+        headers: { accept: "application/json", "content-type": "application/json", "x-app": "cli" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(12000),
+      });
+    } catch (error) {
+      if (index + 1 < CLAUDE_TOKEN_URLS.length) continue;
+      throw error;
+    }
+    if (response.ok) break;
+    if ((response.status === 404 || response.status === 405) && index + 1 < CLAUDE_TOKEN_URLS.length) continue;
+
+    const rotated = await waitForRotatedClaudeCredentials(credentialPath, oauth);
+    if (rotated) return rotated;
+    const loginHint = response.status === 400 || response.status === 401 ? "; run claude auth login" : "";
+    throw new Error(`Claude OAuth refresh returned HTTP ${response.status}${loginHint}`);
+  }
+
+  if (!response?.ok) throw new Error("Claude OAuth refresh failed; run claude auth login");
+  const payload = await response.json();
+  if (typeof payload?.access_token !== "string" || !payload.access_token) {
+    throw new Error("Claude OAuth refresh did not return an access token");
+  }
+
+  const latest = readClaudeCredentials(credentialPath);
+  const latestOauth = claudeOauthFrom(latest);
+  if (
+    (latestOauth.accessToken && latestOauth.accessToken !== oauth.accessToken)
+    || (latestOauth.refreshToken && latestOauth.refreshToken !== refreshToken)
+  ) {
+    return latest;
+  }
+
+  const expiresIn = Number(payload.expires_in);
+  const refreshedOauth = {
+    ...latestOauth,
+    accessToken: payload.access_token,
+    refreshToken: payload.refresh_token || refreshToken,
+    expiresAt: Number.isFinite(expiresIn) ? now + expiresIn * 1000 : now + 8 * 60 * 60 * 1000,
+  };
+  if (typeof payload.scope === "string" && payload.scope.trim()) {
+    refreshedOauth.scopes = payload.scope.trim().split(/\s+/);
+  }
+  const refreshed = { ...latest, claudeAiOauth: refreshedOauth };
+  writeJsonAtomically(credentialPath, refreshed);
+  return refreshed;
+}
+
+async function fetchClaudeQuota(provider) {
+  const credentialPath = claudeCredentialPath();
+  let credentials = readClaudeCredentials(credentialPath);
+  let oauth = claudeOauthFrom(credentials);
 
   try {
-    const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        accept: "application/json",
-        "anthropic-beta": "oauth-2025-04-20",
-      },
-      signal: AbortSignal.timeout(12000),
-    });
+    if (claudeTokenExpiresSoon(oauth) || typeof oauth.accessToken !== "string" || !oauth.accessToken) {
+      credentials = await refreshClaudeCredential(credentials, { credentialPath });
+      oauth = claudeOauthFrom(credentials);
+    }
+
+    let response = await fetchClaudeUsage(oauth.accessToken);
+    if (response.status === 401) {
+      const rotated = rotatedClaudeCredentials(credentialPath, oauth);
+      credentials = rotated || await refreshClaudeCredential(credentials, { credentialPath });
+      oauth = claudeOauthFrom(credentials);
+      response = await fetchClaudeUsage(oauth.accessToken);
+    }
     if (!response.ok) throw new Error(`Claude usage endpoint returned HTTP ${response.status}`);
     const payload = await response.json();
     const windows = normalizeClaudeUsagePayload(payload, provider?.quota);
@@ -258,7 +884,10 @@ async function fetchClaudeQuota(provider) {
     };
   } finally {
     // Do not let an OAuth credential remain reachable after the account request.
-    credentials.claudeAiOauth.accessToken = null;
+    if (credentials?.claudeAiOauth) {
+      credentials.claudeAiOauth.accessToken = null;
+      credentials.claudeAiOauth.refreshToken = null;
+    }
   }
 }
 
@@ -1024,9 +1653,13 @@ function writeManagedUsageSnapshot(source, snapshot) {
   const provider = PROVIDER_BY_ID.get(source);
   if (!provider) throw new Error(`Unknown usage source: ${source}`);
   const logDir = provider.usage.logRoot;
-  const filePath = join(logDir, `${provider.usage.filePrefix}-${localDateKey()}.json`);
-  mkdirSync(logDir, { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+  const filePath = join(logDir, `${provider.usage.filePrefix}.json`);
+  writeConsolidatedUsageSnapshot({
+    output: filePath,
+    prefix: provider.usage.filePrefix,
+    roots: [logDir, ...(provider.usage.legacyRoots || [])],
+    incoming: snapshot,
+  });
   return filePath;
 }
 
@@ -1035,12 +1668,13 @@ function usageSnapshotPath(source) {
   if (!provider) return null;
   const logDir = provider.usage.logRoot;
   if (!existsSync(logDir)) return null;
+  const rollingFile = join(logDir, `${provider.usage.filePrefix}.json`);
+  if (existsSync(rollingFile)) return rollingFile;
   const files = readdirSync(logDir)
-    .filter((name) => name.toLowerCase().endsWith(".json"))
+    .filter((name) => new RegExp(`^${escapeRegExp(provider.usage.filePrefix)}-\\d{4}-\\d{2}-\\d{2}\\.json$`, "i").test(name))
     .sort()
     .reverse();
-  const today = `${provider.usage.filePrefix}-${localDateKey()}.json`;
-  return join(logDir, files.includes(today) ? today : files[0] || "");
+  return files.length ? join(logDir, files[0]) : null;
 }
 
 function usageTotal(usage) {
@@ -1089,17 +1723,57 @@ function currentUsageAggregate(source, inMemoryUsage) {
   }
 }
 
+function observationFile(source) {
+  return join(OBSERVATION_ROOT, source, `quota-observations-${source}.json`);
+}
+
 function observationFiles(source) {
   const logDir = join(OBSERVATION_ROOT, source);
   if (!existsSync(logDir)) return [];
+  const rollingName = `quota-observations-${source}.json`;
   return readdirSync(logDir)
-    .filter((name) => /^quota-observations-\d{4}-\d{2}-\d{2}\.json$/i.test(name))
+    .filter((name) => name === rollingName || /^quota-observations-\d{4}-\d{2}-\d{2}\.json$/i.test(name))
     .sort()
     .map((name) => join(logDir, name));
 }
 
+function observationKey(observation) {
+  return [
+    observation?.windowName || "quota-window",
+    observation?.fetchedAt || "",
+    observation?.segment ?? "",
+    observation?.usedPercent ?? "",
+    observation?.totalTokens ?? "",
+    observation?.resetAt || "",
+  ].join("|");
+}
+
+export function mergeObservationHistory(
+  observations,
+  additions = [],
+  {
+    now = new Date(),
+    retentionDays = STORAGE_RETENTION_DAYS,
+    maxEntries = MAX_QUOTA_OBSERVATIONS,
+  } = {},
+) {
+  const cutoff = new Date(now);
+  cutoff.setDate(cutoff.getDate() - retentionDays);
+  const cutoffMs = cutoff.getTime();
+  const byKey = new Map();
+  for (const observation of [...(observations || []), ...(additions || [])]) {
+    const timestamp = new Date(observation?.fetchedAt || 0).getTime();
+    if (!Number.isFinite(timestamp) || timestamp < cutoffMs) continue;
+    byKey.set(observationKey(observation), observation);
+  }
+  const merged = [...byKey.values()].sort(
+    (a, b) => new Date(a.fetchedAt || 0).getTime() - new Date(b.fetchedAt || 0).getTime(),
+  );
+  return compactObservations(merged, maxEntries);
+}
+
 function allObservations(source) {
-  return observationFiles(source).flatMap((filePath) => {
+  const observations = observationFiles(source).flatMap((filePath) => {
     try {
       const payload = readJson(filePath);
       return Array.isArray(payload?.observations) ? payload.observations : [];
@@ -1107,16 +1781,19 @@ function allObservations(source) {
       return [];
     }
   });
+  return mergeObservationHistory(observations);
 }
 
-function cleanupObservations(source, retentionDays = 120) {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - retentionDays);
-  const cutoffKey = localDateKey(cutoff);
-  for (const filePath of observationFiles(source)) {
-    const match = filePath.match(/(\d{4}-\d{2}-\d{2})\.json$/);
-    if (match && match[1] < cutoffKey) unlinkSync(filePath);
-  }
+function persistObservations(source, observations) {
+  const filePath = observationFile(source);
+  writeJsonAtomic(filePath, {
+    source,
+    updatedAt: new Date().toISOString(),
+    retentionDays: STORAGE_RETENTION_DAYS,
+    observations,
+  });
+  removeLegacyDatedFiles(join(OBSERVATION_ROOT, source), "quota-observations", { exclude: filePath });
+  return filePath;
 }
 
 function observationWindows(snapshot) {
@@ -1197,11 +1874,18 @@ export function compactObservations(observations, maxEntries = 96) {
 
 function writeQuotaObservation(snapshot, usageAggregate) {
   const source = snapshot.source;
-  cleanupObservations(source);
-  const windows = observationWindows(snapshot);
-  if (!windows.length) return { recorded: false, file: null, reason: "quota window unavailable" };
-
   const history = allObservations(source);
+  const filesBeforeWrite = observationFiles(source);
+  const rollingFile = observationFile(source);
+  const migrationRequired = filesBeforeWrite.some((filePath) => filePath !== rollingFile);
+  const windows = observationWindows(snapshot);
+  if (!windows.length) {
+    const filePath = history.length && (migrationRequired || !existsSync(rollingFile))
+      ? persistObservations(source, history)
+      : existsSync(rollingFile) ? rollingFile : null;
+    return { recorded: false, file: filePath, reason: "quota window unavailable" };
+  }
+
   const fetchedAt = snapshot.fetchedAt || new Date().toISOString();
   const additions = [];
   for (const window of windows) {
@@ -1239,23 +1923,15 @@ function writeQuotaObservation(snapshot, usageAggregate) {
       resetReason: segmentDecision.reason,
     });
   }
-  if (!additions.length) return { recorded: false, file: null, reason: "unchanged observations" };
-
-  const logDir = join(OBSERVATION_ROOT, source);
-  const filePath = join(logDir, `quota-observations-${localDateKey()}.json`);
-  mkdirSync(logDir, { recursive: true });
-  let observations = [];
-  if (existsSync(filePath)) {
-    try {
-      const current = readJson(filePath);
-      observations = Array.isArray(current?.observations) ? current.observations : [];
-    } catch (_) {
-      observations = [];
-    }
+  if (!additions.length && !migrationRequired && existsSync(rollingFile)) {
+    return { recorded: false, file: rollingFile, reason: "unchanged observations" };
   }
-  observations.push(...additions);
-  observations = compactObservations(observations, 96);
-  writeFileSync(filePath, `${JSON.stringify({ source, date: localDateKey(), observations }, null, 2)}\n`, "utf8");
+
+  const observations = mergeObservationHistory(history, additions);
+  const filePath = persistObservations(source, observations);
+  if (!additions.length) {
+    return { recorded: false, file: filePath, reason: "unchanged observations" };
+  }
   return {
     recorded: true,
     file: filePath,
@@ -1269,13 +1945,81 @@ function writeQuotaObservation(snapshot, usageAggregate) {
 }
 
 function snapshotFile(source) {
-  return join(QUOTA_ROOT, source, `quota-${source}-${localDateKey()}.json`);
+  return join(QUOTA_ROOT, source, `quota-${source}.json`);
+}
+
+function quotaSnapshotFiles(source) {
+  const logDir = join(QUOTA_ROOT, source);
+  if (!existsSync(logDir)) return [];
+  const rollingName = `quota-${source}.json`;
+  const datedPattern = new RegExp(`^quota-${escapeRegExp(source)}-\\d{4}-\\d{2}-\\d{2}\\.json$`, "i");
+  return readdirSync(logDir)
+    .filter((name) => name === rollingName || datedPattern.test(name))
+    .sort()
+    .map((name) => join(logDir, name));
+}
+
+function snapshotDateKey(snapshot) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(snapshot?.date || "")) return snapshot.date;
+  const date = new Date(snapshot?.fetchedAt || snapshot?.generatedAt || 0);
+  return Number.isNaN(date.getTime()) ? null : localDateKey(date);
+}
+
+function snapshotTimestamp(snapshot) {
+  const value = new Date(snapshot?.fetchedAt || snapshot?.generatedAt || 0).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+export function mergeQuotaSnapshotHistory(
+  snapshots,
+  current = null,
+  {
+    now = new Date(),
+    retentionDays = STORAGE_RETENTION_DAYS,
+    maxEntries = MAX_DAILY_QUOTA_SNAPSHOTS,
+  } = {},
+) {
+  const cutoff = new Date(now);
+  cutoff.setDate(cutoff.getDate() - retentionDays);
+  const cutoffKey = localDateKey(cutoff);
+  const byDate = new Map();
+  for (const snapshot of [...(snapshots || []), ...(current ? [current] : [])]) {
+    const dateKey = snapshotDateKey(snapshot);
+    if (!dateKey || dateKey < cutoffKey) continue;
+    const prior = byDate.get(dateKey);
+    if (!prior || snapshotTimestamp(snapshot) >= snapshotTimestamp(prior)) byDate.set(dateKey, snapshot);
+  }
+  return [...byDate.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .slice(-Math.max(1, Math.floor(Number(maxEntries) || MAX_DAILY_QUOTA_SNAPSHOTS)))
+    .map(([, snapshot]) => snapshot);
+}
+
+function readQuotaSnapshotHistory(source) {
+  return quotaSnapshotFiles(source).flatMap((filePath) => {
+    try {
+      const payload = readJson(filePath);
+      if (Array.isArray(payload?.history)) return payload.history;
+      if (payload?.latest && typeof payload.latest === "object") return [payload.latest];
+      return payload && typeof payload === "object" ? [payload] : [];
+    } catch (_) {
+      return [];
+    }
+  });
 }
 
 function writeSnapshot(snapshot) {
-  const filePath = snapshotFile(snapshot.source);
-  mkdirSync(join(QUOTA_ROOT, snapshot.source), { recursive: true });
-  writeFileSync(filePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+  const source = snapshot.source;
+  const filePath = snapshotFile(source);
+  const history = mergeQuotaSnapshotHistory(readQuotaSnapshotHistory(source), snapshot);
+  writeJsonAtomic(filePath, {
+    source,
+    updatedAt: new Date().toISOString(),
+    retentionDays: STORAGE_RETENTION_DAYS,
+    latest: history.at(-1) || snapshot,
+    history,
+  });
+  removeLegacyDatedFiles(join(QUOTA_ROOT, source), `quota-${source}`, { exclude: filePath });
   return filePath;
 }
 
@@ -1322,8 +2066,18 @@ const QUOTA_ADAPTERS = {
   },
 };
 
+const MANAGED_USAGE_ADAPTERS = {
+  "opencode-sqlite": () => readOpenCodeUsage(),
+  "deepseek-harness-zstd": (provider) => readDeepSeekHarnessUsage(provider),
+};
+
 async function loadQuota(source) {
   const provider = PROVIDER_BY_ID.get(source);
+  if (!provider?.quota) {
+    const usageAdapter = MANAGED_USAGE_ADAPTERS[provider?.usage?.adapter];
+    if (!usageAdapter) throw new Error(`No managed usage adapter is registered for ${source}`);
+    return { snapshot: null, usage: await usageAdapter(provider), quotaExpected: false };
+  }
   const adapter = QUOTA_ADAPTERS[provider?.quota?.adapter];
   if (!adapter) throw new Error(`No quota adapter is registered for ${source}`);
   const loaded = await adapter(provider);
@@ -1349,17 +2103,21 @@ async function main() {
     }
     try {
       const loaded = await loadQuota(source);
+      const provider = PROVIDER_BY_ID.get(source);
       const snapshot = loaded?.snapshot || loaded;
       const usageFile = loaded?.usage ? writeManagedUsageSnapshot(source, loaded.usage) : null;
       if (!snapshot || loaded?.snapshot === null) {
         results.push({
           source,
+          kind: provider?.quota ? "quota" : "usage",
           ok: true,
-          partial: true,
+          partial: Boolean(provider?.quota),
           skipped: false,
           file: null,
           usageFile,
-          warning: loaded?.snapshotError || "Account quota was unavailable; local usage was still exported",
+          warning: provider?.quota
+            ? loaded?.snapshotError || "Account quota was unavailable; local usage was still exported"
+            : null,
           observation: { recorded: false, file: null, reason: "quota window unavailable" },
         });
         continue;
@@ -1368,6 +2126,7 @@ async function main() {
       const observation = writeQuotaObservation(snapshot, currentUsageAggregate(source, loaded?.usage));
       results.push({
         source,
+        kind: "quota",
         ok: true,
         partial: Boolean(loaded?.snapshotWarnings?.length),
         skipped: false,

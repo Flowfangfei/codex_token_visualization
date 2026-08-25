@@ -66,7 +66,11 @@ function Stop-ExistingDashboard {
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-  throw "Node.js was not found in PATH. Install Node.js 22 or newer, or start the dashboard from a terminal where node is available."
+  throw "Node.js was not found in PATH. Install Node.js 22.15 or newer, or start the dashboard from a terminal where node is available."
+}
+$nodeVersion = [version](& node -p "process.versions.node")
+if ($nodeVersion -lt [version]"22.15.0") {
+  throw "Node.js $nodeVersion is too old. Install Node.js 22.15 or newer to read DeepSeek Harness Zstandard logs."
 }
 
 Stop-ExistingDashboard -LocalPort $Port -BaseUrl $Url
