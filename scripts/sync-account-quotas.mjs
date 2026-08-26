@@ -16,7 +16,7 @@ const QUOTA_ROOT = process.env.QUOTA_SNAPSHOT_DIR || join(USAGE_ROOT, "quota-sna
 const OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || join(USAGE_ROOT, "quota-observations");
 const PROVIDERS = providerRegistry.PROVIDERS;
 const PROVIDER_BY_ID = new Map(PROVIDERS.map((entry) => [entry.id, entry]));
-const MANAGED_USAGE_ADAPTER_IDS = new Set(["opencode-sqlite", "deepseek-harness-zstd"]);
+const MANAGED_USAGE_ADAPTER_IDS = new Set(["opencode-sqlite", "deepseek-harness-zstd", "grok-local-jsonl"]);
 const SOURCES = PROVIDERS
   .filter((entry) => entry.quota || MANAGED_USAGE_ADAPTER_IDS.has(entry.usage?.adapter))
   .map((entry) => entry.id);
@@ -203,6 +203,202 @@ export function readOpenCodeUsage(databasePath = openCodeDatabasePath()) {
   } finally {
     database.close();
   }
+}
+
+const GROK_USAGE_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "reasoningOutputTokens",
+  "cacheReadTokens",
+  "cacheCreationTokens",
+  "totalTokens",
+  "totalCost",
+];
+
+function grokDateKey(value) {
+  const numeric = Number(value);
+  const normalized = Number.isFinite(numeric) && numeric > 0 && numeric < 1e12 ? numeric * 1000 : value;
+  const date = Number.isFinite(Number(normalized)) ? new Date(Number(normalized)) : new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : localDateKey(date);
+}
+
+export function normalizeGrokPromptUsage(value) {
+  if (!value || typeof value !== "object") return null;
+  const fullInputTokens = Math.max(0, numberOrZero(value.inputTokens));
+  const cacheReadTokens = Math.min(fullInputTokens, Math.max(0, numberOrZero(
+    value.cachedReadTokens ?? value.cacheReadInputTokens ?? value.cacheReadTokens,
+  )));
+  const cacheCreationTokens = Math.min(
+    Math.max(0, fullInputTokens - cacheReadTokens),
+    Math.max(0, numberOrZero(value.cacheCreationTokens ?? value.cacheCreationInputTokens)),
+  );
+  const fullOutputTokens = Math.max(0, numberOrZero(value.outputTokens));
+  const reasoningOutputTokens = Math.min(fullOutputTokens, Math.max(0, numberOrZero(value.reasoningTokens)));
+  const inputTokens = Math.max(0, fullInputTokens - cacheReadTokens - cacheCreationTokens);
+  const outputTokens = Math.max(0, fullOutputTokens - reasoningOutputTokens);
+  const calculatedTotal = fullInputTokens + fullOutputTokens;
+
+  return {
+    inputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    totalTokens: Math.max(calculatedTotal, numberOrZero(value.totalTokens)),
+    totalCost: 0,
+  };
+}
+
+export function grokTurnUsageRecord(payload, fallbackModel = "unknown-model") {
+  const update = payload?.params?.update;
+  if (update?.sessionUpdate !== "turn_completed" || !update?.usage) return null;
+  const date = grokDateKey(payload?.params?._meta?.agentTimestampMs ?? payload?.timestamp);
+  const usage = normalizeGrokPromptUsage(update.usage);
+  if (!date || !usage) return null;
+
+  const modelEntries = Object.entries(update.usage.modelUsage || {})
+    .map(([modelName, modelUsage]) => ({ modelName, ...normalizeGrokPromptUsage(modelUsage) }))
+    .filter((entry) => entry.totalTokens > 0);
+  const models = modelEntries.length === 1
+    ? [{ modelName: modelEntries[0].modelName, ...usage }]
+    : modelEntries.length
+      ? modelEntries
+      : [{ modelName: fallbackModel, ...usage }];
+  const promptId = update.prompt_id || payload?.params?._meta?.promptId || null;
+  const eventId = payload?.params?._meta?.eventId || null;
+
+  return {
+    date,
+    ...usage,
+    models,
+    dedupeKey: promptId ? `prompt:${promptId}` : eventId ? `event:${eventId}` : null,
+  };
+}
+
+export function aggregateGrokUsageRecords(records, generatedAt = new Date().toISOString(), sourceStats = {}) {
+  const byDay = new Map();
+  for (const record of records || []) {
+    if (!record?.date) continue;
+    const day = byDay.get(record.date) || {
+      date: record.date,
+      ...Object.fromEntries(GROK_USAGE_FIELDS.map((field) => [field, 0])),
+      models: new Map(),
+    };
+    for (const field of GROK_USAGE_FIELDS) day[field] += numberOrZero(record[field]);
+    for (const modelRecord of record.models || []) {
+      const modelName = String(modelRecord?.modelName || "unknown-model");
+      const model = day.models.get(modelName) || Object.fromEntries(GROK_USAGE_FIELDS.map((field) => [field, 0]));
+      for (const field of GROK_USAGE_FIELDS) model[field] += numberOrZero(modelRecord[field]);
+      day.models.set(modelName, model);
+    }
+    byDay.set(record.date, day);
+  }
+
+  const daily = [...byDay.values()]
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((day) => ({
+      ...Object.fromEntries(GROK_USAGE_FIELDS.map((field) => [field, day[field]])),
+      date: day.date,
+      modelsUsed: [...day.models.keys()],
+      modelBreakdowns: [...day.models.entries()]
+        .map(([modelName, usage]) => ({ modelName, ...usage }))
+        .sort((a, b) => b.totalTokens - a.totalTokens),
+    }));
+  const totals = Object.fromEntries(GROK_USAGE_FIELDS.map((field) => [
+    field,
+    daily.reduce((sum, day) => sum + numberOrZero(day[field]), 0),
+  ]));
+
+  return {
+    source: "grok",
+    generatedAt,
+    provider: "grok-local-primary-session-jsonl",
+    recordCount: records?.length || 0,
+    daily,
+    totals,
+    ...sourceStats,
+  };
+}
+
+function grokSessionFiles(root) {
+  const files = [];
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop();
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(entryPath);
+      else if (entry.isFile() && entry.name === "updates.jsonl") files.push(entryPath);
+    }
+  }
+  return files.sort();
+}
+
+function grokSessionRelationship(sessionDirectory) {
+  const eventsPath = join(sessionDirectory, "events.jsonl");
+  if (!existsSync(eventsPath)) return null;
+  for (const line of readFileSync(eventsPath, "utf8").split(/\r?\n/).slice(0, 8)) {
+    if (!line.trim()) continue;
+    try {
+      const relationship = JSON.parse(line)?.session_relationship;
+      if (typeof relationship === "string" && relationship.trim()) return relationship.trim().toLowerCase();
+    } catch (_) {
+      // A partially written event line does not make the session unreadable.
+    }
+  }
+  return null;
+}
+
+export function readGrokUsage(provider) {
+  const sessionRoot = provider?.usage?.sessionRoot
+    || process.env.GROK_SESSION_ROOT
+    || join(process.env.GROK_HOME || join(homedir(), ".grok"), "sessions");
+  if (!existsSync(sessionRoot)) throw new Error("Grok session directory was not found");
+
+  const files = grokSessionFiles(sessionRoot);
+  if (!files.length) throw new Error("Grok has no local session logs");
+  const records = [];
+  const seen = new Set();
+  const sourceStats = {
+    scannedFiles: files.length,
+    includedFiles: 0,
+    skippedNonPrimaryFiles: 0,
+    invalidLines: 0,
+    duplicateRecords: 0,
+  };
+
+  for (const filePath of files) {
+    const relationship = grokSessionRelationship(dirname(filePath));
+    if (relationship && relationship !== "primary") {
+      sourceStats.skippedNonPrimaryFiles += 1;
+      continue;
+    }
+    sourceStats.includedFiles += 1;
+    const lines = readFileSync(filePath, "utf8").split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (!line.includes('"turn_completed"')) continue;
+      let payload;
+      try {
+        payload = JSON.parse(line);
+      } catch (_) {
+        sourceStats.invalidLines += 1;
+        continue;
+      }
+      const record = grokTurnUsageRecord(payload);
+      if (!record) continue;
+      const dedupeKey = record.dedupeKey || `file:${filePath}:${index}`;
+      if (seen.has(dedupeKey)) {
+        sourceStats.duplicateRecords += 1;
+        continue;
+      }
+      seen.add(dedupeKey);
+      delete record.dedupeKey;
+      records.push(record);
+    }
+  }
+
+  return aggregateGrokUsageRecords(records, new Date().toISOString(), sourceStats);
 }
 
 const ZSTD_MAGIC = 0xFD2FB528;
@@ -2069,6 +2265,7 @@ const QUOTA_ADAPTERS = {
 const MANAGED_USAGE_ADAPTERS = {
   "opencode-sqlite": () => readOpenCodeUsage(),
   "deepseek-harness-zstd": (provider) => readDeepSeekHarnessUsage(provider),
+  "grok-local-jsonl": (provider) => readGrokUsage(provider),
 };
 
 async function loadQuota(source) {

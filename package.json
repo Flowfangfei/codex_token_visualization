@@ -11,6 +11,7 @@
     "export:kimi": "node --no-warnings ./scripts/sync-account-quotas.mjs --source kimi --json",
     "export:opencode": "node --no-warnings ./scripts/sync-account-quotas.mjs --source opencode --json",
     "export:deepseek-harness": "node --no-warnings ./scripts/sync-account-quotas.mjs --source deepseek-harness --json",
+    "export:grok": "node --no-warnings ./scripts/sync-account-quotas.mjs --source grok --json",
     "export:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/export-daily.ps1 -Source all",
     "task:register": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/register-daily-task.ps1",
     "test": "node --no-warnings --test tests/*.test.js"

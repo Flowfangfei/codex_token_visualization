@@ -1,6 +1,6 @@
 # AI Token Ledger
 
-> 面向 Windows 的本地 AI 编程助手用量仪表盘，集中展示 Codex、Claude Code、Cursor、Kimi、OpenCode 与 DeepSeek Harness 的 token 消耗、账户额度、重置时间和耗尽预测。
+> 面向 Windows 的本地 AI 编程助手用量仪表盘，集中展示 Codex、Claude Code、Cursor、Kimi、OpenCode、DeepSeek Harness 与 Grok 的 token 消耗、账户额度、重置时间和耗尽预测。
 
 `AI Token Ledger` 将本机日志和账户额度快照集中到一个本地仪表盘中。程序直接读取本地文件，不依赖数据库；usage JSON、每日导出和 `npx` 缓存均保存在项目目录中。
 
@@ -38,6 +38,10 @@ DeepSeek Harness 页面只读扫描本地 `session.jsonl.zstd`，按会话、推
 
 ![DeepSeek Harness 本地用量](docs/assets/deepseek-harness-usage.png)
 
+### Grok 本地用量
+
+Grok 页面汇总当前 Windows 用户在本机运行 Grok CLI 产生的主会话记录。统计按日期和模型展示普通输入、缓存读写、输出与推理 token，不读取账号总用量。
+
 ### 数据源显示设置
 
 齿轮按钮可以选择导航、总览和预测页中关注的 Provider。隐藏只改变页面展示，后台全量刷新和历史快照仍会继续维护所有已注册来源。
@@ -60,8 +64,8 @@ DeepSeek Harness 页面只读扫描本地 `session.jsonl.zstd`，按会话、推
 
 | 能力 | 说明 |
 | --- | --- |
-| 多来源用量账本 | 分别展示 Codex、Claude Code、Cursor、Kimi Code、OpenCode 与 DeepSeek Harness；总览由后端注册表动态聚合。 |
-| 每日快照 | Codex / Claude Code / all-agent 使用 `ccusage`；Cursor 汇总 usage events；Kimi 汇总 `wire.jsonl`；OpenCode 汇总 SQLite；DeepSeek Harness 汇总 Zstandard 会话计量事件。 |
+| 多来源用量账本 | 分别展示 Codex、Claude Code、Cursor、Kimi Code、OpenCode、DeepSeek Harness 与 Grok；总览由后端注册表动态聚合。 |
+| 每日快照 | Codex / Claude Code / all-agent 使用 `ccusage`；Cursor 汇总 usage events；Kimi 汇总 `wire.jsonl`；OpenCode 汇总 SQLite；DeepSeek Harness 汇总 Zstandard 会话计量事件；Grok 汇总本地主会话的 `turn_completed` 记录。 |
 | 日历热力图 | 总览按天展示最近最多 53 周的 Token 用量，颜色深浅反映各活跃日的相对用量。 |
 | 官方额度窗口 | 同步 Codex、Claude Code、Cursor 与 Kimi 的当前已用比例、剩余额度、账期或重置时间。 |
 | 统一刷新 | 顶部刷新和“全部导出”会刷新全部已注册本地 token 与账户额度源。 |
@@ -77,7 +81,7 @@ DeepSeek Harness 页面只读扫描本地 `session.jsonl.zstd`，按会话、推
 
 ### 1. 检查运行环境
 
-当前项目面向 Windows 10/11，建议使用 Node.js 22.15 或更高版本、PowerShell，以及已经登录的 Codex / Claude Code / Cursor。Node 22.15 是读取 DeepSeek Harness Zstandard 会话日志所需的最低版本。Kimi 官方桌面应用和 Kimi Code CLI 的本地 token 都可读取；会员月总额来自已登录的 Kimi 桌面应用，周额度来自已登录的 Kimi Code CLI。OpenCode 与 DeepSeek Harness 是可选来源，只要已经生成对应本地日志即可，无需把它们加入 `PATH`。
+当前项目面向 Windows 10/11，建议使用 Node.js 22.15 或更高版本、PowerShell，以及已经登录的 Codex / Claude Code / Cursor。Node 22.15 是读取 DeepSeek Harness Zstandard 会话日志所需的最低版本。Kimi 官方桌面应用和 Kimi Code CLI 的本地 token 都可读取；会员月总额来自已登录的 Kimi 桌面应用，周额度来自已登录的 Kimi Code CLI。OpenCode、DeepSeek Harness 与 Grok 是可选来源，生成对应本地记录后即可读取。
 
 ```powershell
 node --version
@@ -131,6 +135,15 @@ $env:DEEPSEEK_HARNESS_SESSION_ROOT = "D:\deepseek-harness\.dsh-home\sessions"
 $env:DEEPSEEK_HARNESS_PROVIDER_IDS = "deepseek,deepseek-official,my-deepseek-gateway"
 ```
 
+Grok 默认从当前用户目录读取 CLI 和会话记录：
+
+```powershell
+Test-Path "$HOME\.grok\bin\grok.exe"
+Test-Path "$HOME\.grok\sessions"
+```
+
+自定义安装可设置 `GROK_HOME`、`GROK_CLI_PATH` 或 `GROK_SESSION_ROOT`。Grok 数据源不调用账号用量接口，适合共享账号下分别统计各台电脑的本地 CLI 使用量。
+
 ### 2. 导出第一份数据
 
 ```powershell
@@ -173,18 +186,21 @@ flowchart LR
   T[Kimi 桌面应用 wire.jsonl] --> Q
   V[OpenCode opencode.db] --> W[assistant message token 聚合]
   Y[DeepSeek Harness session.jsonl.zstd] --> Z[逐步骤 usage 去重]
+  AB[Grok updates.jsonl] --> AC[主会话 turn usage 去重]
   B --> G[usage-logs/codex/daily]
   D --> H[usage-logs/claude/daily]
   F --> I[usage-logs/cursor/daily]
   Q --> R[usage-logs/kimi/daily]
   W --> X[usage-logs/opencode/daily]
   Z --> AA[usage-logs/deepseek-harness/daily]
+  AC --> AD[usage-logs/grok/daily]
   G --> J[AI Token Ledger WebUI]
   H --> J
   I --> J
   R --> J
   X --> J
   AA --> J
+  AD --> J
   K[Codex app-server] --> L[账户额度快照]
   M[Claude OAuth usage] --> L
   N[Cursor usage summary] --> L
@@ -197,7 +213,7 @@ flowchart LR
 点击顶部刷新或“全部导出”时，系统执行：
 
 1. 从后端注册表读取标记为自动导出的 `ccusage` 来源，并行导出 Codex 与 Claude Code 用量。
-2. 同步 Codex、Claude Code、Cursor、Kimi Code 的账户额度与本地事件来源，并导出 OpenCode 与 DeepSeek Harness 本地用量。
+2. 同步 Codex、Claude Code、Cursor、Kimi Code 的账户额度与本地事件来源，并导出 OpenCode、DeepSeek Harness 与 Grok 本地用量。
 3. 记录去重后的分段观测点。
 4. 重新读取当前页面，各标签页使用同一轮数据。
 
@@ -215,6 +231,7 @@ flowchart LR
 | `Kimi` | Kimi `usage.record` 的本地 token 明细、会员月额度构成和周额度。 |
 | `OpenCode` | OpenCode assistant 消息的本地 token、费用和 `provider/model` 分布；不生成不存在的统一额度预测。 |
 | `DeepSeek Harness` | Harness 会话中实际路由到 DeepSeek 的逐日 token、缓存、输出、推理与模型分布；不读取正文，也不虚构账户额度。 |
+| `Grok` | 当前用户在本机运行 Grok CLI 产生的逐日 token 和模型分布；账号总用量不进入本地账本。 |
 | `齿轮` | 选择显示在导航、总览和预测中的 Provider；至少保留一个，设置保存在本地。 |
 | `数据源` | 日志目录、检测状态、每日快照和额度观测点数量。 |
 
@@ -232,6 +249,7 @@ flowchart LR
 | Kimi | CLI `~/.kimi-code/sessions/**/wire.jsonl` + 桌面应用嵌入式 Kimi Code `sessions/**/wire.jsonl` | Kimi 会员 subscription stats + Kimi Code managed usage | 会员月总额及 Kimi / Code 构成、周额度与各自重置时间 |
 | OpenCode | `~/.local/share/opencode/opencode.db` 中的 assistant token 字段 | 无统一账户口径 | 不生成额度窗口 |
 | DeepSeek Harness | `.dsh-home/sessions/**/session.jsonl.zstd` 中的 usage 事件 | 未发现可验证的本机统一额度接口 | 不生成额度窗口 |
+| Grok | `~/.grok/sessions/**/updates.jsonl` 中主会话的 `turn_completed` usage | 不读取账号额度 | 不生成额度窗口 |
 
 ### Codex
 
@@ -260,6 +278,12 @@ Kimi token 明细来自 CLI 和官方桌面应用的本地会话。统计以 tur
 解析结果只含日期、Provider、模型和 token 数字。会话 ID、工作目录、请求头正文、用户消息、助手文本和工具内容均在解析时丢弃，不会写入 `usage-logs`。活动文件末尾若存在未完成 frame，会保留此前完整 frame 并跳过残缺尾部；单个损坏文件不会阻止其他会话统计，但所有文件均不可解码时导出会失败并保留旧账本。
 
 DeepSeek Harness 目前作为纯本地用量来源接入。没有经过验证的官方账户额度百分比与重置时间接口，因此页面不会凭 token 数量伪造额度或耗尽预测。
+
+### Grok
+
+Grok 数据源扫描当前用户目录下的 `updates.jsonl`，提取主会话完成时写入的 usage。分叉会话中重复的 prompt 会被去重；子代理用量已经包含在主会话记录中，因此不再单独累加。Grok 的 ACP 输入字段包含缓存命中，输出字段包含推理 token，采集器会拆分这些子项，使页面构成之和保持与 Grok 记录的总 token 一致。
+
+滚动账本保存日期、模型和 token 数字。提示词、回复、会话标题、工作目录、会话 ID、账号信息和费用字段不写入 `usage-logs`。该数据源不访问 `/usage` 或其他账号接口，共享账号中其他设备和其他用户的用量不会进入本机统计。
 
 ## 额度预测：原始 Token、模型等效 Token 与重置
 
@@ -402,6 +426,9 @@ npm run export:opencode
 # 只同步 DeepSeek Harness 本地 token
 npm run export:deepseek-harness
 
+# 只同步 Grok 本地 token
+npm run export:grok
+
 # 启动本地 WebUI
 npm start
 ```
@@ -422,6 +449,7 @@ usage-logs/
 ├─ kimi/daily/kimi-usage.json         # Kimi wire 完整每日历史滚动文件
 ├─ opencode/daily/opencode-usage.json # OpenCode SQLite 完整每日历史滚动文件
 ├─ deepseek-harness/daily/deepseek-harness-usage.json # Harness 完整每日历史滚动文件
+├─ grok/daily/grok-usage.json         # Grok CLI 本地主会话每日历史滚动文件
 ├─ all/daily/all-usage.json           # all-agent 完整每日历史滚动文件
 ├─ display-settings.json        # 本地 Provider 显示选择
 ├─ forecast-settings.json       # 预测页本地设置
@@ -446,15 +474,15 @@ usage-logs/
 
 ### 本地凭证与忽略文件
 
-- Codex / Claude / Cursor / Kimi / OpenCode / DeepSeek Harness 的 access token、refresh token、API key、cookie；
-- 邮箱、完整账户 ID、会话内容、原始 Cursor events、OpenCode message 正文或 Harness message/tool 正文；
+- Codex / Claude / Cursor / Kimi / OpenCode / DeepSeek Harness / Grok 的 access token、refresh token、API key、cookie；
+- 邮箱、完整账户 ID、会话内容、原始 Cursor events、OpenCode message 正文、Harness message/tool 正文或 Grok prompt/response；
 - `usage-logs/`、`codex-usage-logs/`、`.npm-cache/`、`verification/`、`node_modules/`。
 
 账户凭证保留在本机进程内存中，用于读取对应服务的账户用量。浏览器接收的是汇总后的额度数据。
 
 ### 数据口径
 
-仪表盘汇总当前机器上 Codex、Claude Code、Cursor、Kimi Code、OpenCode 和 DeepSeek Harness 的每日 token 记录。具备账户额度接口的来源还会结合额度比例和重置时间，计算近期使用速度与预计可用时间。
+仪表盘汇总当前机器上 Codex、Claude Code、Cursor、Kimi Code、OpenCode、DeepSeek Harness 和 Grok 的每日 token 记录。具备账户额度接口的来源还会结合额度比例和重置时间，计算近期使用速度与预计可用时间。Grok 统计限定为当前用户目录中的本地 CLI 主会话。
 
 本地 token 统计来自各客户端在本机保留的日志。订阅产品的实际扣减还可能受到套餐、模型、缓存、上下文、任务复杂度、云端执行和平台策略影响，因此预测以官方额度比例和重置时间为基准，本地 token 用于估计使用速度和变化趋势。
 
@@ -519,6 +547,18 @@ npm run export:deepseek-harness
 ```
 
 要求 Node.js `>=22.15`。输出文件是 `usage-logs\deepseek-harness\daily\deepseek-harness-usage.json`。如果 Harness 使用自定义 home，请先设置 `DEEPSEEK_HARNESS_HOME` 或 `DEEPSEEK_HARNESS_SESSION_ROOT`；如果使用自定义 DeepSeek 路由名，再设置 `DEEPSEEK_HARNESS_PROVIDER_IDS`。顶部刷新与每日定时任务都会调用同一采集器。
+
+### Grok 今天的 token 没出现
+
+确认 CLI 和本机会话目录存在，再单独同步：
+
+```powershell
+Test-Path "$HOME\.grok\bin\grok.exe"
+Test-Path "$HOME\.grok\sessions"
+npm run export:grok
+```
+
+输出文件是 `usage-logs\grok\daily\grok-usage.json`。Grok 完成至少一次本地 CLI 任务并写入 `turn_completed` 后，刷新会更新当天汇总。自定义目录可通过 `GROK_HOME` 或 `GROK_SESSION_ROOT` 指定。
 
 ### 使用其他 WebUI 端口
 
@@ -586,4 +626,4 @@ node --check web/app.js
 node --check web/forecast-model.js
 ```
 
-测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤、Kimi CLI/桌面事件合并去重、OpenCode 多模型聚合、DeepSeek Harness 多 frame 解码与逐步骤去重，以及显示设置的过滤与最少一个来源约束。
+测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤、Kimi CLI/桌面事件合并去重、OpenCode 多模型聚合、DeepSeek Harness 多 frame 解码与逐步骤去重、Grok 主会话筛选与分叉去重，以及显示设置的过滤与最少一个来源约束。

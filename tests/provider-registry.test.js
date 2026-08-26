@@ -15,6 +15,7 @@ test("public provider metadata excludes backend paths and adapters", () => {
     "kimi",
     "opencode",
     "deepseek-harness",
+    "grok",
   ]);
   for (const entry of publicEntries) {
     assert.equal("usage" in entry, false);
@@ -160,6 +161,110 @@ test("OpenCode assistant messages aggregate by day and provider-qualified model"
     "deepseek/deepseek-v4-flash",
     "anthropic/claude-sonnet-4-5",
   ]);
+});
+
+test("Grok primary-session usage separates cache and reasoning without changing the total", async () => {
+  const { aggregateGrokUsageRecords, grokTurnUsageRecord } = await import("../scripts/sync-account-quotas.mjs");
+  const timestamp = new Date(2026, 7, 26, 9, 30).getTime();
+  const record = grokTurnUsageRecord({
+    timestamp: Math.floor(timestamp / 1000),
+    params: {
+      update: {
+        sessionUpdate: "turn_completed",
+        prompt_id: "prompt-local-1",
+        usage: {
+          inputTokens: 1000,
+          outputTokens: 200,
+          totalTokens: 1200,
+          cachedReadTokens: 400,
+          cacheCreationTokens: 100,
+          reasoningTokens: 50,
+          modelUsage: {
+            "grok-4.6-build": {
+              inputTokens: 1000,
+              outputTokens: 200,
+              totalTokens: 1200,
+              cachedReadTokens: 400,
+              cacheCreationTokens: 100,
+              reasoningTokens: 50,
+            },
+          },
+        },
+      },
+      _meta: { agentTimestampMs: timestamp, eventId: "event-local-1" },
+    },
+  });
+  const snapshot = aggregateGrokUsageRecords([{ ...record, dedupeKey: undefined }], "2026-08-26T01:30:00.000Z");
+
+  assert.equal(record.date, "2026-08-26");
+  assert.deepEqual({
+    inputTokens: record.inputTokens,
+    cacheReadTokens: record.cacheReadTokens,
+    cacheCreationTokens: record.cacheCreationTokens,
+    outputTokens: record.outputTokens,
+    reasoningOutputTokens: record.reasoningOutputTokens,
+    totalTokens: record.totalTokens,
+  }, {
+    inputTokens: 500,
+    cacheReadTokens: 400,
+    cacheCreationTokens: 100,
+    outputTokens: 150,
+    reasoningOutputTokens: 50,
+    totalTokens: 1200,
+  });
+  assert.equal(snapshot.provider, "grok-local-primary-session-jsonl");
+  assert.equal(snapshot.daily[0].modelBreakdowns[0].modelName, "grok-4.6-build");
+  assert.equal(snapshot.totals.totalTokens, 1200);
+});
+
+test("Grok local reader skips subagents, deduplicates forks, and exports no session content", async () => {
+  const { readGrokUsage } = await import("../scripts/sync-account-quotas.mjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-local-usage-"));
+  const timestamp = new Date(2026, 7, 26, 10, 0).getTime();
+  const usageUpdate = (promptId, totalTokens) => JSON.stringify({
+    timestamp: Math.floor(timestamp / 1000),
+    params: {
+      update: {
+        sessionUpdate: "turn_completed",
+        prompt_id: promptId,
+        usage: {
+          inputTokens: totalTokens - 100,
+          outputTokens: 100,
+          totalTokens,
+          cachedReadTokens: 0,
+          cacheCreationTokens: 0,
+          reasoningTokens: 0,
+          modelUsage: { "grok-4.6-build": { inputTokens: totalTokens - 100, outputTokens: 100, totalTokens } },
+        },
+      },
+      _meta: { agentTimestampMs: timestamp },
+    },
+  });
+  const writeSession = (name, relationship, lines) => {
+    const directory = path.join(root, name);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, "events.jsonl"), `${JSON.stringify({ session_relationship: relationship })}\n`);
+    fs.writeFileSync(path.join(directory, "updates.jsonl"), `${lines.join("\n")}\n`);
+  };
+
+  try {
+    writeSession("primary", "primary", [
+      JSON.stringify({ params: { update: { content: { text: "must-not-survive" } } } }),
+      usageUpdate("same-prompt", 1200),
+    ]);
+    writeSession("fork", "primary", [usageUpdate("same-prompt", 1200)]);
+    writeSession("child", "subagent", [usageUpdate("child-prompt", 900)]);
+
+    const snapshot = readGrokUsage({ usage: { sessionRoot: root } });
+    assert.equal(snapshot.recordCount, 1);
+    assert.equal(snapshot.totals.totalTokens, 1200);
+    assert.equal(snapshot.duplicateRecords, 1);
+    assert.equal(snapshot.skippedNonPrimaryFiles, 1);
+    assert.equal(JSON.stringify(snapshot).includes("must-not-survive"), false);
+    assert.equal(JSON.stringify(snapshot).includes("same-prompt"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Codex quota sync prefers the npm CLI shim over an inaccessible packaged executable", async () => {
