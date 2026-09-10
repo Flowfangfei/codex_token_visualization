@@ -2,6 +2,84 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const ForecastModel = require("../web/forecast-model.js");
 
+function interval(model, index, tokens = 1_000_000, quota = 2) {
+  return { segmentIndex: index % 2, endedAt: `2026-09-${String(index + 1).padStart(2, "0")}T12:00:00Z`,
+    deltaTokens: tokens, deltaPercent: quota, modelDeltas: { [model]: tokens } };
+}
+
+test("new models cannot inherit old other-model weights, even with a large historical sample", () => {
+  const history = Array.from({ length: 20 }, (_, index) => interval("old", index));
+  const recent = [{ totalTokens: 2e6, modelBreakdowns: [{ modelName: "gpt-6-astra", totalTokens: 2e6 }] }];
+  const weighted = { active: true, primaryModels: ["old"], weightMap: { old: 1, "other-models": 0.5 } };
+  let result = ForecastModel.assessModelCalibration(history, recent, weighted);
+  assert.equal(result.ready, false);
+  assert.deepEqual(result.unsupportedModels, ["gpt-6-astra"]);
+  assert.equal(result.support["gpt-6-astra"], 0);
+  history.push(...[0, 1, 2].map((i) => interval("gpt-6-astra", i, 2e6, 10)));
+  result = ForecastModel.assessModelCalibration(history, recent, weighted);
+  assert.equal(result.ready, false); // Three samples alone do not create a fitted model weight.
+  assert.equal(result.support["gpt-6-astra"], 3);
+  assert.equal(history.length, 23);
+});
+
+test("raw scalar fits need a stable mix; unchanged single-model usage remains usable", () => {
+  const history = [0, 1, 2, 3].map((i) => interval("old", i));
+  const usage = (model) => [{ totalTokens: 1e6, modelBreakdowns: [{ modelName: model, totalTokens: 1e6 }] }];
+  assert.equal(ForecastModel.assessModelCalibration(history, usage("old"), { active: false }).ready, true);
+  history.push(...[0, 1, 2].map((i) => interval("new", i)));
+  assert.equal(ForecastModel.assessModelCalibration(history, usage("new"), { active: false }).reason, "model-mix-changed");
+  assert.equal(ForecastModel.assessModelCalibration(history, [{ totalTokens: 1e6 }], { active: false }).ready, false);
+});
+
+test("recent models get explicit features instead of being hidden by large old-model lifetime totals", () => {
+  const history = [
+    ...[0, 1, 2, 3].map((i) => interval("old-a", i, (i + 1) * 100e6, (i + 1) * 10)),
+    ...[0, 1, 2, 3].map((i) => interval("old-b", i, (i + 1) * 100e6, (i + 1) * 20)),
+    ...[0, 1, 2, 3].map((i) => interval("gpt-6-astra", i, (i + 1) * 1e6, (i + 1) * 0.4)),
+  ];
+  const recent = [{ totalTokens: 1e6, modelBreakdowns: [{ modelName: "gpt-6-astra", totalTokens: 1e6 }] }];
+  const raw = ForecastModel.fitSegmentedQuota(history);
+  const fit = ForecastModel.fitModelWeightsFromIntervals(history, raw.model.slope,
+    { priorityModels: ForecastModel.recentModelNames(recent) });
+  assert.equal(fit.active, true);
+  assert.ok(fit.primaryModels.includes("gpt-6-astra"));
+  assert.ok(fit.weightMap["gpt-6-astra"] > fit.weightMap["old-a"]);
+  assert.equal(ForecastModel.assessModelCalibration(history, recent, fit).ready, true);
+  assert.equal(fit.sampleCount, history.length);
+});
+
+test("invalid weights and too few per-model observations do not pass calibration", () => {
+  const history = [0, 1].map((i) => interval("new", i));
+  const recent = [{ totalTokens: 1e6, modelBreakdowns: [{ modelName: "new", totalTokens: 1e6 }] }];
+  const fit = { active: true, primaryModels: ["new"], weightMap: { new: 2 } };
+  assert.equal(ForecastModel.assessModelCalibration(history, recent, fit).ready, false);
+  history.push(interval("new", 2));
+  assert.equal(ForecastModel.assessModelCalibration(history, recent, fit).ready, true);
+  fit.weightMap.new = Infinity;
+  assert.equal(ForecastModel.assessModelCalibration(history, recent, fit).ready, false);
+});
+
+test("measured expensive models are not truncated to an arbitrary fourfold cap", () => {
+  const history = [
+    ...[0, 1, 2, 3].map((i) => interval("old", i, (i + 1) * 100e6, (i + 1) * 10)),
+    ...[0, 1, 2, 3].map((i) => interval("new", i, (i + 1) * 1e6, (i + 1) * 2)),
+  ];
+  const raw = ForecastModel.fitSegmentedQuota(history);
+  const fit = ForecastModel.fitModelWeightsFromIntervals(history, raw.model.slope, { priorityModels: ["new"] });
+  assert.equal(fit.active, true);
+  assert.ok(fit.weightMap.new > 4);
+  const recent = [{ totalTokens: 1e6, modelBreakdowns: [{ modelName: "new", totalTokens: 1e6 }] }];
+  assert.equal(ForecastModel.assessModelCalibration(history, recent, fit).ready, true);
+});
+
+test("recent model-specific mismatch is not hidden by a large historical sample", () => {
+  const history = [...Array.from({ length: 20 }, (_, i) => interval("old", i, 100e6, 10)),
+    ...[20, 21, 22].map((i) => interval("new", i, 1e6, 5))];
+  const recent = [{ totalTokens: 1e6, modelBreakdowns: [{ modelName: "new", totalTokens: 1e6 }] }];
+  const oldWeights = { active: true, primaryModels: ["old", "new"], weightMap: { old: 1, new: 1 } };
+  assert.equal(ForecastModel.assessModelCalibration(history, recent, oldWeights).reason, "model-fit-unstable");
+});
+
 function day(index, alpha, beta) {
   return {
     date: `2026-07-${String(index).padStart(2, "0")}`,

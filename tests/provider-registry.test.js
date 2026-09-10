@@ -16,6 +16,7 @@ test("public provider metadata excludes backend paths and adapters", () => {
     "opencode",
     "deepseek-harness",
     "grok",
+    "grok-build",
   ]);
   for (const entry of publicEntries) {
     assert.equal("usage" in entry, false);
@@ -23,12 +24,179 @@ test("public provider metadata excludes backend paths and adapters", () => {
     assert.equal("detectPaths" in entry, false);
     assert.equal("sourceDescription" in entry, false);
   }
+  assert.equal(publicEntries.find((entry) => entry.id === "grok").overviewGroup, "grok");
+  assert.equal(publicEntries.find((entry) => entry.id === "grok-build").overviewGroup, "grok");
 });
 
 test("automatic refresh excludes the redundant aggregate ccusage scan", () => {
   assert.deepEqual(registry.AUTO_EXPORT_SOURCES.map((entry) => entry.id), ["codex", "claude"]);
   assert.equal(registry.AGGREGATE_PROVIDER.usage.autoExport, false);
   assert.deepEqual(registry.AGGREGATE_PROVIDER.usage.ccusageArgs, ["daily"]);
+});
+
+test("Grok Build completed turns normalize cached input and deduplicate restored sessions", async () => {
+  const { aggregateGrokBuildUsageRecords, parseGrokBuildUsageJsonl } = await import("../scripts/sync-account-quotas.mjs");
+  const completed = {
+    timestamp: 1788498000,
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "turn_completed",
+        prompt_id: "private-prompt-id",
+        usage: {
+          modelUsage: {
+            "grok-4.6-build": {
+              inputTokens: 1000,
+              outputTokens: 100,
+              totalTokens: 1100,
+              cachedReadTokens: 700,
+              cacheCreationTokens: 100,
+              reasoningTokens: 80,
+              costUsdTicks: 1000000000,
+            },
+          },
+        },
+      },
+    },
+  };
+  const first = parseGrokBuildUsageJsonl([
+    JSON.stringify({ timestamp: 1788497999, params: { update: { sessionUpdate: "agent_message", usage: { inputTokens: 9999 } } } }),
+    JSON.stringify(completed),
+    "{unfinished",
+  ].join("\n"), { sourceKey: "parent" });
+  const restored = parseGrokBuildUsageJsonl(JSON.stringify(completed), { sourceKey: "restored-child" });
+  const snapshot = aggregateGrokBuildUsageRecords(
+    [...first.records, ...restored.records],
+    "2026-09-04T01:00:00.000Z",
+    { invalidLines: first.invalidLines + restored.invalidLines },
+  );
+
+  assert.equal(first.completedTurns, 1);
+  assert.equal(first.invalidLines, 1);
+  assert.equal(snapshot.recordCount, 1);
+  assert.equal(snapshot.rawRecordCount, 2);
+  assert.equal(snapshot.duplicateRecords, 1);
+  assert.equal(snapshot.daily[0].inputTokens, 200);
+  assert.equal(snapshot.daily[0].cacheReadTokens, 700);
+  assert.equal(snapshot.daily[0].cacheCreationTokens, 100);
+  assert.equal(snapshot.daily[0].outputTokens, 100);
+  assert.equal(snapshot.daily[0].reasoningOutputTokens, 80);
+  assert.equal(snapshot.daily[0].totalTokens, 1100);
+  assert.equal(snapshot.daily[0].totalCost, 0.1);
+  assert.equal(snapshot.daily[0].modelBreakdowns[0].modelName, "grok-4.6-build");
+  assert.equal(JSON.stringify(snapshot).includes("private-prompt-id"), false);
+  assert.equal(JSON.stringify(snapshot).includes("prompt_id"), false);
+});
+
+test("Grok Build parser falls back to top-level usage and accepts ISO timestamps", async () => {
+  const { aggregateGrokBuildUsageRecords, parseGrokBuildUsageJsonl } = await import("../scripts/sync-account-quotas.mjs");
+  const parsed = parseGrokBuildUsageJsonl(JSON.stringify({
+    timestamp: "2026-09-04T02:30:00.000Z",
+    params: {
+      update: {
+        sessionUpdate: "turn_completed",
+        usage: {
+          inputTokens: 90,
+          outputTokens: 10,
+          totalTokens: 100,
+          cachedReadTokens: 50,
+          reasoningTokens: 4,
+          costUsdTicks: 500000000,
+        },
+      },
+    },
+  }), { sourceKey: "standalone" });
+  const snapshot = aggregateGrokBuildUsageRecords(parsed.records);
+
+  assert.equal(parsed.missingTimestamps, 0);
+  assert.equal(snapshot.daily[0].modelBreakdowns[0].modelName, "unknown");
+  assert.equal(snapshot.daily[0].inputTokens, 40);
+  assert.equal(snapshot.daily[0].cacheReadTokens, 50);
+  assert.equal(snapshot.daily[0].totalTokens, 100);
+  assert.equal(snapshot.daily[0].totalCost, 0.05);
+});
+
+test("Grok Build billing normalizes the official weekly percentage and reset", async () => {
+  const { normalizeGrokBillingPayload } = await import("../scripts/sync-account-quotas.mjs");
+  const snapshot = normalizeGrokBillingPayload({
+    config: {
+      creditUsagePercent: 9,
+      currentPeriod: {
+        type: "USAGE_PERIOD_TYPE_WEEKLY",
+        start: "2026-09-02T07:38:26Z",
+        end: "2026-09-09T07:38:26Z",
+      },
+      prepaidBalance: { val: 250 },
+      isUnifiedBillingUser: true,
+    },
+    subscriptionTier: "SuperGrok",
+  }, "2026-09-04T06:00:00.000Z");
+
+  assert.equal(snapshot.provider, "grok-build-official-cli-billing");
+  assert.equal(snapshot.planType, "SuperGrok");
+  assert.equal(snapshot.windows[0].name, "weekly_limit");
+  assert.equal(snapshot.windows[0].label, "SuperGrok 周总额度");
+  assert.equal(snapshot.windows[0].usedPercent, 9);
+  assert.equal(snapshot.windows[0].remainingPercent, 91);
+  assert.equal(snapshot.windows[0].windowDurationMins, 10080);
+  assert.equal(snapshot.windows[0].resetsAt, "2026-09-09T07:38:26.000Z");
+  assert.equal(snapshot.prepaidBalanceCents, 250);
+
+  assert.throws(() => normalizeGrokBillingPayload({
+    config: {
+      currentPeriod: {
+        type: "USAGE_PERIOD_TYPE_WEEKLY",
+        start: "2026-09-02T07:38:26Z",
+        end: "2026-09-09T07:38:26Z",
+      },
+    },
+  }), /did not include a current usage period/);
+
+  const unnamedPlan = normalizeGrokBillingPayload({
+    config: {
+      creditUsagePercent: 0,
+      currentPeriod: {
+        type: "USAGE_PERIOD_TYPE_WEEKLY",
+        start: "2026-09-02T07:38:26Z",
+        end: "2026-09-09T07:38:26Z",
+      },
+    },
+  });
+  assert.equal(unnamedPlan.windows[0].label, "Grok 共享周额度");
+});
+
+test("Grok Build banked reset parser drops token ids and keeps expiry only", async () => {
+  const { parseGrokResetCreditsBuffer } = await import("../scripts/sync-account-quotas.mjs");
+  const varint = (input) => {
+    let value = Number(input);
+    const bytes = [];
+    do {
+      const byte = value % 128;
+      value = Math.floor(value / 128);
+      bytes.push(byte | (value > 0 ? 0x80 : 0));
+    } while (value > 0);
+    return Buffer.from(bytes);
+  };
+  const field = (number, payload) => Buffer.concat([varint(number * 8 + 2), varint(payload.length), payload]);
+  const expiresAt = "2026-09-12T18:49:00.000Z";
+  const timestamp = Buffer.concat([
+    varint(1 * 8),
+    varint(Math.floor(new Date(expiresAt).getTime() / 1000)),
+  ]);
+  const token = Buffer.concat([
+    field(1, Buffer.from("must-not-survive", "utf8")),
+    field(3, timestamp),
+  ]);
+  const payload = field(1, token);
+  const frame = Buffer.alloc(5 + payload.length);
+  frame.writeUInt32BE(payload.length, 1);
+  payload.copy(frame, 5);
+
+  const snapshot = parseGrokResetCreditsBuffer(frame, new Date("2026-09-04T00:00:00Z").getTime());
+  assert.equal(snapshot.available_count, 1);
+  assert.equal(snapshot.credits[0].status, "available");
+  assert.equal(snapshot.credits[0].expires_at, expiresAt);
+  assert.equal(JSON.stringify(snapshot).includes("must-not-survive"), false);
 });
 
 test("DeepSeek Harness concatenated Zstandard frames decode without exposing message content", async () => {

@@ -223,7 +223,7 @@ function normalizeCreditsPayload(payload) {
   };
 }
 
-async function fetchResetCredits() {
+async function fetchCodexResetCredits() {
   let accessToken;
   try {
     accessToken = readCodexAccessToken();
@@ -249,10 +249,50 @@ async function fetchResetCredits() {
       };
     }
 
-    return normalizeCreditsPayload(await response.json());
+    return {
+      source: "codex",
+      source_label: "Codex",
+      ...normalizeCreditsPayload(await response.json()),
+    };
   } finally {
     accessToken = null;
   }
+}
+
+function storedGrokResetCredits() {
+  const latest = quotaSnapshots("grok-build").latest;
+  if (!latest) {
+    return {
+      ok: false,
+      status: 404,
+      source: "grok-build",
+      source_label: "Grok Build",
+      message: "尚未同步 Grok Build 额度；点击右上角刷新后重试。",
+    };
+  }
+  if (!latest.resetCredits?.ok) {
+    return {
+      ok: false,
+      status: 502,
+      source: "grok-build",
+      source_label: "Grok Build",
+      message: latest.resetCreditsError || "Grok Build 未返回 banked reset 状态。",
+    };
+  }
+  return {
+    source: "grok-build",
+    source_label: "Grok Build",
+    ok: true,
+    fetched_at: localDateTime(latest.resetCredits.fetched_at || latest.fetchedAt),
+    available_count: Number(latest.resetCredits.available_count) || 0,
+    credits: (Array.isArray(latest.resetCredits.credits) ? latest.resetCredits.credits : []).map((credit) => ({
+      status: credit?.status || "available",
+      title: credit?.title || "Grok usage-limit reset",
+      granted_at: localDateTime(credit?.granted_at),
+      expires_at: localDateTime(credit?.expires_at),
+      expires_at_ms: Number(credit?.expires_at_ms) || null,
+    })),
+  };
 }
 
 function normalizeSource(value, fallback = "codex") {
@@ -726,8 +766,24 @@ const server = http.createServer((req, res) => {
     }
 
     if (req.method === "GET" && req.url.startsWith("/api/reset-credits")) {
-      fetchResetCredits()
-        .then((payload) => sendJson(res, payload.ok ? 200 : payload.status || 500, payload))
+      const source = sourceFromUrl(req, "codex");
+      const provider = PROVIDERS.find((entry) => entry.id === source);
+      if (!provider?.resetCredits) {
+        sendJson(res, 400, { ok: false, message: "Unknown reset-credit source" });
+        return;
+      }
+      const request = source === "grok-build"
+        ? Promise.resolve(storedGrokResetCredits())
+        : fetchCodexResetCredits();
+      request
+        .then((payload) => sendJson(res, payload.ok ? 200 : payload.status || 500, {
+          ...payload,
+          planningPolicy: provider.resetPlanning ? {
+            cycleMode: provider.resetPlanning.cycleMode,
+            windowNames: provider.resetPlanning.windowNames,
+            creditTitles: provider.resetPlanning.creditTitles,
+          } : null,
+        }))
         .catch((error) => {
           sendJson(res, 500, {
             ok: false,

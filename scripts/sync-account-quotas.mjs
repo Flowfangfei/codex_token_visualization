@@ -16,7 +16,12 @@ const QUOTA_ROOT = process.env.QUOTA_SNAPSHOT_DIR || join(USAGE_ROOT, "quota-sna
 const OBSERVATION_ROOT = process.env.QUOTA_OBSERVATION_DIR || join(USAGE_ROOT, "quota-observations");
 const PROVIDERS = providerRegistry.PROVIDERS;
 const PROVIDER_BY_ID = new Map(PROVIDERS.map((entry) => [entry.id, entry]));
-const MANAGED_USAGE_ADAPTER_IDS = new Set(["opencode-sqlite", "deepseek-harness-zstd", "grok-local-jsonl"]);
+const MANAGED_USAGE_ADAPTER_IDS = new Set([
+  "opencode-sqlite",
+  "deepseek-harness-zstd",
+  "grok-local-jsonl",
+  "grok-build-jsonl",
+]);
 const SOURCES = PROVIDERS
   .filter((entry) => entry.quota || MANAGED_USAGE_ADAPTER_IDS.has(entry.usage?.adapter))
   .map((entry) => entry.id);
@@ -675,6 +680,497 @@ export function readDeepSeekHarnessUsage(provider) {
     providerIds: provider?.usage?.providerIds,
     sourceStats,
   });
+}
+
+function grokBuildTimestamp(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  let timestamp = Number.isFinite(numeric)
+    ? (Math.abs(numeric) < 1_000_000_000_000 ? numeric * 1000 : numeric)
+    : new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return null;
+  timestamp = Math.trunc(timestamp);
+  return Number.isNaN(new Date(timestamp).getTime()) ? null : timestamp;
+}
+
+function grokBuildUsageRecord(value, { modelName, timestampMs, dedupeKey }) {
+  if (!value || typeof value !== "object" || !timestampMs) return null;
+  const reportedInput = Math.max(0, numberOrZero(value.inputTokens));
+  const outputTokens = Math.max(0, numberOrZero(value.outputTokens));
+  const cacheReadTokens = Math.min(reportedInput, Math.max(0, numberOrZero(value.cachedReadTokens)));
+  const cacheCreationTokens = Math.min(
+    Math.max(0, reportedInput - cacheReadTokens),
+    Math.max(0, numberOrZero(value.cacheCreationTokens)),
+  );
+  const inputTokens = Math.max(0, reportedInput - cacheReadTokens - cacheCreationTokens);
+  const reportedTotal = Math.max(0, numberOrZero(value.totalTokens));
+  return {
+    date: localDateKey(new Date(timestampMs)),
+    modelName: String(modelName || "unknown"),
+    inputTokens,
+    outputTokens,
+    reasoningOutputTokens: Math.max(0, numberOrZero(value.reasoningTokens)),
+    cacheReadTokens,
+    cacheCreationTokens,
+    totalTokens: reportedTotal || reportedInput + outputTokens,
+    totalCost: Math.max(0, numberOrZero(value.costUsdTicks)) / 10_000_000_000,
+    timestampMs,
+    dedupeKey,
+  };
+}
+
+export function parseGrokBuildUsageJsonl(text, { sourceKey = "session" } = {}) {
+  const records = [];
+  let invalidLines = 0;
+  let completedTurns = 0;
+  let missingTimestamps = 0;
+  const lines = String(text || "").split(/\r?\n/);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch (_) {
+      invalidLines += 1;
+      continue;
+    }
+    const update = event?.params?.update;
+    if (update?.sessionUpdate !== "turn_completed" || !update.usage || typeof update.usage !== "object") continue;
+    completedTurns += 1;
+    const timestampMs = grokBuildTimestamp(event.timestamp ?? update.timestamp ?? event.time);
+    if (!timestampMs) {
+      missingTimestamps += 1;
+      continue;
+    }
+    const promptId = String(update.prompt_id ?? update.promptId ?? "").trim();
+    const modelUsage = update.usage.modelUsage;
+    const modelEntries = modelUsage && typeof modelUsage === "object" && !Array.isArray(modelUsage)
+      ? Object.entries(modelUsage).filter(([, usage]) => usage && typeof usage === "object")
+      : [];
+    const usages = modelEntries.length ? modelEntries : [["unknown", update.usage]];
+
+    for (const [modelName, usage] of usages.sort(([left], [right]) => left.localeCompare(right))) {
+      const recordKey = promptId
+        ? `${promptId}\0${modelName}`
+        : `${sourceKey}\0${index + 1}\0${modelName}`;
+      const record = grokBuildUsageRecord(usage, { modelName, timestampMs, dedupeKey: recordKey });
+      if (record) records.push(record);
+    }
+  }
+
+  return { records, invalidLines, completedTurns, missingTimestamps };
+}
+
+export function aggregateGrokBuildUsageRecords(
+  records,
+  generatedAt = new Date().toISOString(),
+  sourceStats = {},
+) {
+  const deduplicated = new Map();
+  for (const record of records || []) {
+    if (!record?.dedupeKey) continue;
+    const previous = deduplicated.get(record.dedupeKey);
+    if (!previous
+      || record.timestampMs > previous.timestampMs
+      || (record.timestampMs === previous.timestampMs && record.totalTokens >= previous.totalTokens)) {
+      deduplicated.set(record.dedupeKey, record);
+    }
+  }
+  const sanitized = [...deduplicated.values()].map(({ dedupeKey: _key, timestampMs: _timestamp, ...record }) => record);
+  const snapshot = aggregateOpenCodeUsageRecords(sanitized, generatedAt);
+  return {
+    ...snapshot,
+    source: "grok-build",
+    provider: "grok-build-session-jsonl",
+    recordCount: sanitized.length,
+    rawRecordCount: records?.length || 0,
+    duplicateRecords: Math.max(0, (records?.length || 0) - sanitized.length),
+    ...sourceStats,
+  };
+}
+
+function grokBuildSessionFiles(root) {
+  const files = [];
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop();
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(entryPath);
+      else if (entry.isFile() && entry.name === "updates.jsonl") files.push(entryPath);
+    }
+  }
+  return files.sort();
+}
+
+export function readGrokBuildUsage(provider) {
+  const sessionRoot = provider?.usage?.sessionRoot
+    || process.env.GROK_BUILD_SESSION_ROOT
+    || join(process.env.GROK_HOME || join(homedir(), ".grok"), "sessions");
+  if (!existsSync(sessionRoot)) throw new Error("Grok Build session directory was not found");
+  const files = grokBuildSessionFiles(sessionRoot);
+  if (!files.length) throw new Error("Grok Build has no session logs");
+
+  const records = [];
+  const sourceStats = {
+    scannedFiles: files.length,
+    readFiles: 0,
+    unreadableFiles: 0,
+    invalidLines: 0,
+    completedTurns: 0,
+    missingTimestamps: 0,
+  };
+  for (const filePath of files) {
+    try {
+      const parsed = parseGrokBuildUsageJsonl(readFileSync(filePath, "utf8"), { sourceKey: filePath });
+      records.push(...parsed.records);
+      sourceStats.readFiles += 1;
+      sourceStats.invalidLines += parsed.invalidLines;
+      sourceStats.completedTurns += parsed.completedTurns;
+      sourceStats.missingTimestamps += parsed.missingTimestamps;
+    } catch (_) {
+      sourceStats.unreadableFiles += 1;
+    }
+  }
+  if (!sourceStats.readFiles) throw new Error("Grok Build session logs could not be read");
+  return aggregateGrokBuildUsageRecords(records, new Date().toISOString(), sourceStats);
+}
+
+export function resolveGrokCliPath({ platform = process.platform, env = process.env, pathExists = existsSync } = {}) {
+  const configuredPath = String(env.GROK_CLI_PATH || "").trim();
+  if (configuredPath && pathExists(configuredPath)) return configuredPath;
+  const bundledPath = join(env.GROK_HOME || join(homedir(), ".grok"), "bin", platform === "win32" ? "grok.exe" : "grok");
+  return pathExists(bundledPath) ? bundledPath : "grok";
+}
+
+function grokPeriodMinutes(period) {
+  const start = new Date(period?.start).getTime();
+  const end = new Date(period?.end).getTime();
+  if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+    return Math.round((end - start) / 60000);
+  }
+  const kind = String(period?.type || "").toLowerCase();
+  if (kind.includes("week")) return 10080;
+  if (kind.includes("month")) return 43200;
+  return null;
+}
+
+export function normalizeGrokBillingPayload(payload, fetchedAt = new Date().toISOString()) {
+  const config = payload?.config;
+  const period = config?.currentPeriod || {
+    start: config?.billingPeriodStart,
+    end: config?.billingPeriodEnd,
+  };
+  const resetsAt = toIso(period?.end ?? config?.billingPeriodEnd);
+  const rawPercent = config?.creditUsagePercent;
+  const explicitPercent = rawPercent === null || rawPercent === undefined || rawPercent === ""
+    ? Number.NaN
+    : Number(rawPercent);
+  const usedPercent = Number.isFinite(explicitPercent)
+    ? clampPercent(explicitPercent)
+    : null;
+  if (usedPercent === null || !resetsAt) {
+    throw new Error("Grok Build billing response did not include a current usage period");
+  }
+  const durationMins = grokPeriodMinutes(period);
+  const kind = String(period?.type || "").toLowerCase();
+  const monthly = kind.includes("month") || (durationMins && durationMins > 20000);
+  const planType = typeof payload?.subscriptionTier === "string" && payload.subscriptionTier.trim()
+    ? payload.subscriptionTier.trim()
+    : null;
+  return {
+    source: "grok-build",
+    fetchedAt,
+    provider: "grok-build-official-cli-billing",
+    planType,
+    windows: [{
+      name: monthly ? "monthly_limit" : "weekly_limit",
+      label: monthly ? "Grok 月度总额度" : planType ? `${planType} 周总额度` : "Grok 共享周额度",
+      usedPercent,
+      remainingPercent: roundPercent(100 - usedPercent),
+      windowDurationMins: durationMins,
+      windowKind: monthly ? "monthly" : "weekly",
+      resetsAt,
+    }],
+    unifiedBilling: config?.isUnifiedBillingUser === true,
+    prepaidBalanceCents: Math.max(0, numberOrZero(config?.prepaidBalance?.val)),
+    onDemandUsedCents: Math.max(0, numberOrZero(config?.onDemandUsed?.val)),
+    onDemandCapCents: Math.max(0, numberOrZero(config?.onDemandCap?.val)),
+  };
+}
+
+export function fetchGrokBilling(provider) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const command = resolveGrokCliPath();
+    const child = spawn(command, ["agent", "--no-leader", "stdio"], {
+      cwd: ROOT,
+      env: { ...process.env, GROK_NO_LEADER: "1" },
+      windowsHide: true,
+    });
+    let buffer = "";
+    let finished = false;
+    const finish = (error, value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      child.stdin.end();
+      setTimeout(() => {
+        if (child.exitCode === null) child.kill();
+      }, 250).unref();
+      if (error) rejectPromise(error);
+      else resolvePromise(value);
+    };
+    const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
+    const timeout = setTimeout(() => finish(new Error("Grok Build account quota request timed out")), 20000);
+
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      let boundary;
+      while ((boundary = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, boundary).trim();
+        buffer = buffer.slice(boundary + 1);
+        if (!line) continue;
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch (_) {
+          continue;
+        }
+        if (message.id === 1) {
+          if (message.error) {
+            finish(new Error("Grok Build ACP initialization was rejected"));
+            return;
+          }
+          send({ jsonrpc: "2.0", id: 2, method: "_x.ai/billing", params: {} });
+        }
+        if (message.id === 2) {
+          if (message.error) {
+            finish(new Error("Grok Build billing request was rejected"));
+            return;
+          }
+          try {
+            finish(null, normalizeGrokBillingPayload(message.result));
+          } catch (error) {
+            finish(error);
+          }
+        }
+      }
+    });
+    child.on("error", (error) => finish(error));
+    child.on("close", (code) => {
+      if (!finished) finish(new Error(`Grok Build account quota process exited (${code ?? "unknown"})`));
+    });
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        clientInfo: { name: "ai-token-ledger", version: "0.1.0" },
+        capabilities: {},
+      },
+    });
+  });
+}
+
+function protobufVarint(buffer, start) {
+  let position = start;
+  let value = 0n;
+  let shift = 0n;
+  while (position < buffer.length && shift <= 63n) {
+    const byte = buffer[position];
+    position += 1;
+    value |= BigInt(byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return { value: Number(value), position };
+    shift += 7n;
+  }
+  throw new Error("Invalid protobuf varint");
+}
+
+function protobufTimestamp(buffer, start, length) {
+  let position = start;
+  const end = Math.min(buffer.length, start + length);
+  let seconds = null;
+  let nanos = 0;
+  while (position < end) {
+    const tag = protobufVarint(buffer, position);
+    position = tag.position;
+    const field = tag.value >> 3;
+    const wire = tag.value & 0x07;
+    if (wire === 0) {
+      const scalar = protobufVarint(buffer, position);
+      position = scalar.position;
+      if (field === 1) seconds = scalar.value;
+      else if (field === 2) nanos = scalar.value;
+    } else if (wire === 2) {
+      const nested = protobufVarint(buffer, position);
+      position = nested.position + nested.value;
+    } else {
+      return null;
+    }
+  }
+  if (!Number.isFinite(seconds)) return null;
+  const timestamp = seconds * 1000 + Math.floor(nanos / 1_000_000);
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function grokResetToken(buffer) {
+  let position = 0;
+  let hasTokenId = false;
+  let expiresAt = null;
+  try {
+    while (position < buffer.length) {
+      const tag = protobufVarint(buffer, position);
+      position = tag.position;
+      const field = tag.value >> 3;
+      const wire = tag.value & 0x07;
+      if (wire === 0) {
+        position = protobufVarint(buffer, position).position;
+        continue;
+      }
+      if (wire !== 2) break;
+      const length = protobufVarint(buffer, position);
+      position = length.position;
+      const end = position + length.value;
+      if (end > buffer.length) break;
+      if (field === 1 || field === 10) {
+        const candidate = buffer.subarray(position, end).toString("utf8");
+        if (candidate.length >= 4 && candidate.length < 200) hasTokenId = true;
+      } else if ([2, 3, 20, 30].includes(field)) {
+        const timestamp = protobufTimestamp(buffer, position, length.value);
+        if (timestamp && (field === 3 || field === 30 || !expiresAt)) expiresAt = timestamp;
+      }
+      position = end;
+    }
+  } catch (_) {
+    return null;
+  }
+  return hasTokenId ? { expiresAt } : null;
+}
+
+function collectGrokResetTokens(buffer, tokens) {
+  let position = 0;
+  while (position < buffer.length) {
+    let tag;
+    try {
+      tag = protobufVarint(buffer, position);
+    } catch (_) {
+      break;
+    }
+    if (tag.position <= position) break;
+    position = tag.position;
+    const field = tag.value >> 3;
+    const wire = tag.value & 0x07;
+    if (wire === 0) {
+      try {
+        position = protobufVarint(buffer, position).position;
+      } catch (_) {
+        break;
+      }
+      continue;
+    }
+    if (wire !== 2) break;
+    let length;
+    try {
+      length = protobufVarint(buffer, position);
+    } catch (_) {
+      break;
+    }
+    position = length.position;
+    const end = position + length.value;
+    if (end > buffer.length) break;
+    const nested = buffer.subarray(position, end);
+    position = end;
+    if (field === 1 || field === 10) {
+      const token = grokResetToken(nested);
+      if (token) tokens.push(token);
+      else collectGrokResetTokens(nested, tokens);
+    }
+  }
+}
+
+function grokGrpcPayload(buffer) {
+  if (buffer.length < 5 || (buffer[0] & 0x7f) !== 0) return buffer;
+  const length = buffer.readUInt32BE(1);
+  return 5 + length <= buffer.length ? buffer.subarray(5, 5 + length) : buffer;
+}
+
+export function parseGrokResetCreditsBuffer(buffer, now = Date.now()) {
+  const tokens = [];
+  collectGrokResetTokens(grokGrpcPayload(Buffer.from(buffer)), tokens);
+  const available = tokens.filter((token) => {
+    const expiry = token.expiresAt ? new Date(token.expiresAt).getTime() : null;
+    return !Number.isFinite(expiry) || expiry > now;
+  });
+  return {
+    available_count: available.length,
+    credits: available.map((token) => ({
+      status: "available",
+      title: "Grok usage-limit reset",
+      granted_at: null,
+      expires_at: token.expiresAt,
+      expires_at_ms: token.expiresAt ? new Date(token.expiresAt).getTime() : null,
+    })),
+  };
+}
+
+function grokAccessToken() {
+  const authPath = process.env.GROK_AUTH_PATH
+    || join(process.env.GROK_HOME || join(homedir(), ".grok"), "auth.json");
+  if (!existsSync(authPath)) throw new Error("Grok Build credentials were not found; run grok login");
+  const values = Object.values(readJson(authPath))
+    .filter((entry) => entry && typeof entry === "object" && typeof entry.key === "string" && entry.key);
+  values.sort((left, right) => new Date(right.expires_at || 0) - new Date(left.expires_at || 0));
+  if (!values.length) throw new Error("Grok Build OAuth credential was not found; run grok login");
+  return values[0].key;
+}
+
+async function fetchGrokResetCredits() {
+  let accessToken = grokAccessToken();
+  try {
+    const response = await fetch("https://grok.com/prod_mc_billing.ConsumerUiSvc/GetRemainingResets", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/grpc-web+proto",
+        "connect-protocol-version": "1",
+        "x-grpc-web": "1",
+      },
+      body: Buffer.from([0, 0, 0, 0, 0]),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (response.status === 401) throw new Error("Grok Build credentials expired; run grok login");
+    if (!response.ok) throw new Error(`Grok reset credits endpoint returned HTTP ${response.status}`);
+    return {
+      ok: true,
+      fetched_at: new Date().toISOString(),
+      ...parseGrokResetCreditsBuffer(Buffer.from(await response.arrayBuffer())),
+    };
+  } finally {
+    accessToken = null;
+  }
+}
+
+async function loadGrokBuildAccount(provider) {
+  const usage = readGrokBuildUsage(provider);
+  try {
+    const snapshot = await fetchGrokBilling(provider);
+    try {
+      snapshot.resetCredits = await fetchGrokResetCredits();
+    } catch (error) {
+      snapshot.resetCreditsError = safeError(error);
+    }
+    return { snapshot, usage };
+  } catch (error) {
+    return {
+      snapshot: null,
+      usage,
+      snapshotError: safeError(error),
+    };
+  }
 }
 
 function readSettings() {
@@ -2260,12 +2756,14 @@ const QUOTA_ADAPTERS = {
       snapshotWarnings: warnings,
     };
   },
+  "grok-build-acp": (provider) => loadGrokBuildAccount(provider),
 };
 
 const MANAGED_USAGE_ADAPTERS = {
   "opencode-sqlite": () => readOpenCodeUsage(),
   "deepseek-harness-zstd": (provider) => readDeepSeekHarnessUsage(provider),
   "grok-local-jsonl": (provider) => readGrokUsage(provider),
+  "grok-build-jsonl": (provider) => readGrokBuildUsage(provider),
 };
 
 async function loadQuota(source) {

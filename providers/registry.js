@@ -13,6 +13,8 @@ const GROK_HOME = process.env.GROK_HOME || path.join(os.homedir(), ".grok");
 const GROK_SESSION_ROOT = process.env.GROK_SESSION_ROOT || path.join(GROK_HOME, "sessions");
 const GROK_CLI_PATH = process.env.GROK_CLI_PATH
   || path.join(GROK_HOME, "bin", process.platform === "win32" ? "grok.exe" : "grok");
+const GROK_BUILD_SESSION_ROOT = process.env.GROK_BUILD_SESSION_ROOT
+  || path.join(GROK_HOME, "sessions");
 
 function usageDirectory(id, envName) {
   return process.env[envName] || path.join(USAGE_ROOT, id, "daily");
@@ -39,6 +41,11 @@ const PROVIDERS = Object.freeze([
     trendTitle: "Codex 最近使用量",
     breakdownTitle: "Codex Token 构成",
     resetCredits: true,
+    resetPlanning: {
+      cycleMode: "restart",
+      windowNames: ["primary", "secondary"],
+      creditTitles: ["Full reset"],
+    },
     detectPaths: [process.env.CODEX_AUTH_PATH || path.join(os.homedir(), ".codex", "auth.json")],
     usage: {
       adapter: "ccusage",
@@ -202,6 +209,7 @@ const PROVIDERS = Object.freeze([
     shortLabel: "Grok",
     tone: "grok",
     color: "#5a6573",
+    overviewGroup: "grok",
     planLabel: null,
     subtitle: "Grok CLI 本机会话计量",
     trendTitle: "Grok 最近使用量",
@@ -216,6 +224,44 @@ const PROVIDERS = Object.freeze([
     },
     quota: null,
     sourceDescription: "Grok CLI local primary-session token records",
+  }),
+  provider({
+    id: "grok-build",
+    label: "Grok Build",
+    shortLabel: "Grok",
+    tone: "grok",
+    color: "#555b65",
+    overviewGroup: "grok",
+    planLabel: null,
+    subtitle: "Grok Build 本地会话计量",
+    trendTitle: "Grok Build 最近使用量",
+    breakdownTitle: "Grok Build Token 构成",
+    forecast: true,
+    resetCredits: true,
+    resetPlanning: {
+      cycleMode: "unknown",
+      windowNames: ["weekly_limit"],
+      creditTitles: ["Grok usage-limit reset"],
+    },
+    detectPaths: [
+      GROK_BUILD_SESSION_ROOT,
+      path.join(GROK_HOME, "bin", process.platform === "win32" ? "grok.exe" : "grok"),
+    ],
+    usage: {
+      adapter: "grok-build-jsonl",
+      filePrefix: "grok-build-usage",
+      logRoot: usageDirectory("grok-build", "GROK_BUILD_USAGE_LOG_DIR"),
+      sessionRoot: GROK_BUILD_SESSION_ROOT,
+    },
+    quota: {
+      adapter: "grok-build-acp",
+      discoverWindows: true,
+      minimumForecastWindowMins: 10080,
+      windows: [
+        { name: "weekly_limit", label: "Grok 共享周额度", windowDurationMins: 10080, windowKind: "weekly" },
+      ],
+    },
+    sourceDescription: "Grok Build local turn usage + official CLI billing",
   }),
 ]);
 
@@ -260,6 +306,7 @@ function publicProvider(entry) {
     navigation: entry.navigation,
     forecast: entry.forecast,
     resetCredits: entry.resetCredits,
+    overviewGroup: entry.overviewGroup || null,
     subtitle: entry.subtitle,
     trendTitle: entry.trendTitle || "最近使用量",
     breakdownTitle: entry.breakdownTitle || "Token 构成",

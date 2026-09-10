@@ -407,6 +407,63 @@
     };
   }
 
+  function recentModelNames(days) {
+    const totals = new Map();
+    for (const day of days || []) {
+      const models = dayModelTokens(day);
+      const total = [...models.values()].reduce((sum, value) => sum + value, 0);
+      for (const [name, value] of models) {
+        if (total > 0 && value / total >= 0.05) totals.set(name, (totals.get(name) || 0) + value);
+      }
+    }
+    return [...totals].sort((a, b) => b[1] - a[1]).map(([name]) => name);
+  }
+
+  // A new model must earn its own quota calibration, not inherit the pooled "other" weight.
+  // These coverage thresholds are safeguards, not statistical confidence guarantees.
+  function assessModelCalibration(intervals, recentDays, modelFit) {
+    const names = recentModelNames(recentDays);
+    const valid = (intervals || []).filter((entry) => entry.deltaTokens > 0 && entry.deltaPercent > 0);
+    const support = Object.fromEntries(names.map((name) => [name, valid.filter((entry) =>
+      (Number(entry.modelDeltas?.[name]) || 0) / entry.deltaTokens >= 0.05).length]));
+    const unsupportedModels = names.filter((name) => name === OTHER_MODEL || support[name] < 3);
+    const base = { ready: false, support, requiredIntervals: 3, unsupportedModels };
+    if (!names.length || unsupportedModels.length) return { ...base, reason: "model-calibrating" };
+    if (modelFit?.active) {
+      const unweighted = names.filter((name) => !modelFit.primaryModels?.includes(name)
+        || !(Number.isFinite(modelFit.weightMap?.[name]) && modelFit.weightMap[name] > 0));
+      if (unweighted.length) return { ...base, unsupportedModels: unweighted, reason: "model-calibrating" };
+      const weighted = applyModelWeightsToIntervals(valid, modelFit);
+      const slope = weightedOriginFit(weighted)?.slope;
+      const unstable = names.filter((name) => {
+        const recent = weighted.filter((entry) => (Number(entry.modelDeltas?.[name]) || 0)
+          / entry.rawDeltaTokens >= 0.05).sort((a, b) => String(a.endedAt).localeCompare(String(b.endedAt))).slice(-3);
+        const observed = recent.reduce((sum, entry) => sum + entry.deltaPercent, 0);
+        const predicted = recent.reduce((sum, entry) => sum + entry.deltaTokens * slope, 0);
+        return !(predicted > 0) || observed / predicted < 0.5 || observed / predicted > 2;
+      });
+      return unstable.length ? { ...base, unsupportedModels: unstable, reason: "model-fit-unstable" }
+        : { ...base, ready: true, reason: null };
+    }
+    // A scalar Token fit is only transferable while the model mix stays similar.
+    const totals = new Map();
+    const reference = valid.map((entry) => entry.endedAt).filter(Boolean).sort().at(-1);
+    valid.forEach((entry) => objectModelTokens(entry.modelDeltas).forEach((value, name) => {
+      totals.set(name, (totals.get(name) || 0) + value * recencyWeight(entry.endedAt, reference, 28));
+    }));
+    const grandTotal = [...totals.values()].reduce((sum, value) => sum + value, 0);
+    const changed = (recentDays || []).some((day) => {
+      const models = dayModelTokens(day);
+      const total = [...models.values()].reduce((sum, value) => sum + value, 0);
+      if (!total) return false;
+      const union = new Set([...totals.keys(), ...models.keys()]);
+      const distance = [...union].reduce((sum, name) => sum
+        + Math.abs((models.get(name) || 0) / total - (totals.get(name) || 0) / grandTotal), 0);
+      return distance > 0.3;
+    });
+    return changed ? { ...base, reason: "model-mix-changed" } : { ...base, ready: true, reason: null };
+  }
+
   function applyModelWeightsToIntervals(intervals, modelFit) {
     if (!modelFit?.active) return intervals || [];
     const primarySet = new Set(modelFit.primaryModels || []);
@@ -453,11 +510,13 @@
       });
     });
     const grandTotal = [...modelTotals.values()].reduce((sum, value) => sum + value, 0);
+    const priorities = options.priorityModels || [];
     const ranked = [...modelTotals.entries()]
-      .filter(([, value]) => grandTotal > 0 && value / grandTotal >= 0.02)
+      .filter(([name, value]) => grandTotal > 0 && (value / grandTotal >= 0.02 || priorities.includes(name)))
       .sort((a, b) => b[1] - a[1]);
     if (ranked.length < 2) return { ...base, reason: "single-model-mix" };
-    const primaryModels = ranked.slice(0, maxFeatures - 1).map(([name]) => name);
+    const primaryModels = [...new Set([...priorities.filter((name) => modelTotals.has(name) && name !== OTHER_MODEL),
+      ...ranked.map(([name]) => name).filter((name) => name !== OTHER_MODEL)])].slice(0, maxFeatures - 1);
     const featureNames = [...primaryModels, OTHER_MODEL];
     const requiredSamples = Math.max(minimumIntervals, featureNames.length + 3);
     if (valid.length < requiredSamples) return { ...base, requiredSamples, reason: "insufficient-snapshots" };
@@ -507,8 +566,11 @@
     if (!coefficients) return { ...base, requiredSamples, reason: "ill-conditioned" };
     const weights = featureNames.map((name, index) => {
       const perMillion = coefficients[index] / scales[index];
-      return { name, weight: Math.min(4, Math.max(0.25, perMillion / priorPerMillion)) };
+      return { name, weight: perMillion / priorPerMillion };
     });
+    if (weights.some((item) => !Number.isFinite(item.weight) || item.weight <= 0)) {
+      return { ...base, requiredSamples, reason: "nonpositive-weight" };
+    }
     const weightMap = Object.fromEntries(weights.map((item) => [item.name, item.weight]));
     const candidate = {
       active: true,
@@ -544,6 +606,8 @@
     applyModelWeights,
     buildSegmentIntervals,
     fitSegmentedQuota,
+    recentModelNames,
+    assessModelCalibration,
     fitModelWeightsFromIntervals,
     applyModelWeightsToIntervals,
   };

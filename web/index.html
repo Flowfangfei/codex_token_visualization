@@ -32,6 +32,7 @@
         <nav class="view-tabs" aria-label="页面视图">
           <button class="view-tab is-active" type="button" data-view="overview">总览</button>
           <button class="view-tab" type="button" data-view="forecast">额度预测</button>
+          <button class="view-tab" type="button" data-view="resets">重置规划</button>
           <span class="provider-tab-fragment" id="providerViewTabs"></span>
           <button class="view-tab" type="button" data-view="sources">数据源</button>
           <button class="display-settings-button" id="displaySettingsBtn" type="button" title="设置显示的数据源" aria-label="设置显示的数据源">⚙</button>
@@ -98,6 +99,17 @@
           </section>
         </section>
 
+        <section class="reset-planner-view is-hidden" id="resetPlannerView" aria-live="polite">
+          <div class="forecast-heading">
+            <div>
+              <p class="section-label">Reset planner</p>
+              <h2>重置规划</h2>
+            </div>
+            <span class="pill">本地时间 · 按需重算</span>
+          </div>
+          <div id="resetPlannerProviders"></div>
+        </section>
+
         <section class="metric-grid" id="metricGrid"></section>
 
         <section class="panel calendar-heatmap-panel" id="calendarHeatmapPanel" aria-live="polite">
@@ -156,6 +168,7 @@
             <p class="section-label">Rate-limit resets</p>
             <h2>重置额度</h2>
             <p id="resetSummary">正在读取可用重置额度...</p>
+            <a class="reset-plan-link" href="#resets" id="resetPlanLink">查看重置规划 →</a>
           </div>
           <div class="reset-list" id="resetCreditList"></div>
         </section>
@@ -242,6 +255,8 @@
 
     <script src="/forecast-model.js"></script>
     <script src="/calendar-heatmap.js"></script>
+    <script src="/reset-optimizer.js"></script>
+    <script src="/reset-planner.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>
