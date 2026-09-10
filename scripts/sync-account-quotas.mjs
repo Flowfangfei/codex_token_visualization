@@ -4,10 +4,14 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, unlinkSyn
 import { arch, homedir, hostname, release, type } from "node:os";
 import { delimiter, dirname, join, resolve, win32 as pathWin32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
 import providerRegistry from "../providers/registry.js";
 import { writeConsolidatedUsageSnapshot } from "./usage-storage.mjs";
+
+const require = createRequire(import.meta.url);
+const Billing = require("../web/billing.js");
 
 const ROOT = resolve(import.meta.dirname, "..");
 const USAGE_ROOT = process.env.USAGE_LOG_ROOT || join(ROOT, "usage-logs");
@@ -606,6 +610,7 @@ export function aggregateDeepSeekHarnessEvents(
         steps.set(event.key, {
           route,
           date: deepSeekHarnessDate(event.time, sessionTime),
+          time: event.time ?? sessionTime,
           usage: event.usage,
         });
         continue;
@@ -616,6 +621,7 @@ export function aggregateDeepSeekHarnessEvents(
         steps.set(event.key, {
           route: event.route || previous?.route || route,
           date: deepSeekHarnessDate(event.time, sessionTime) || previous?.date || null,
+          time: event.time ?? previous?.time ?? sessionTime,
           usage: event.usage || previous?.usage,
         });
       }
@@ -624,21 +630,54 @@ export function aggregateDeepSeekHarnessEvents(
     for (const step of steps.values()) {
       const providerId = String(step.route?.provider || "").toLowerCase();
       if (!step.date || !step.usage || !allowedProviders.has(providerId)) continue;
+      const modelName = `${step.route.provider}/${step.route.model}`;
+      const estimate = Billing.estimateUsageCost(step.usage, modelName, { at: step.time });
       records.push({
         date: step.date,
-        modelName: `${step.route.provider}/${step.route.model}`,
+        modelName,
         ...step.usage,
+        totalCost: Math.round(estimate.amount * 1e6) / 1e6,
+        costCurrency: estimate.currency,
+        billingWindow: estimate.window,
       });
     }
   }
 
   const snapshot = aggregateOpenCodeUsageRecords(records, generatedAt);
+  const peakCost = records.reduce((sum, record) => sum + (record.billingWindow === "peak" ? record.totalCost : 0), 0);
+  const offPeakCost = records.reduce((sum, record) => sum + (record.billingWindow === "peak" ? 0 : record.totalCost), 0);
+  const byDay = new Map();
+  for (const record of records) {
+    const entry = byDay.get(record.date) || { peakCost: 0, offPeakCost: 0, peakRequests: 0, offPeakRequests: 0 };
+    if (record.billingWindow === "peak") {
+      entry.peakCost += record.totalCost;
+      entry.peakRequests += 1;
+    } else {
+      entry.offPeakCost += record.totalCost;
+      entry.offPeakRequests += 1;
+    }
+    byDay.set(record.date, entry);
+  }
+
   return {
     ...snapshot,
     source: "deepseek-harness",
     provider: "deepseek-harness-session-zstd",
     recordCount: records.length,
     providerFilter: [...allowedProviders],
+    costCurrency: "CNY",
+    timedBilling: true,
+    daily: snapshot.daily.map((day) => ({
+      ...day,
+      timedBilling: true,
+      costCurrency: "CNY",
+      ...(byDay.get(day.date) || { peakCost: 0, offPeakCost: 0, peakRequests: 0, offPeakRequests: 0 }),
+    })),
+    totals: {
+      ...snapshot.totals,
+      peakCost,
+      offPeakCost,
+    },
     ...sourceStats,
   };
 }

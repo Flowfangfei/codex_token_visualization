@@ -10,7 +10,7 @@
 
 ### 总览
 
-所有已注册智能体的累计用量、近 30 日估算费用、模型分布、每日 Token 热力图、趋势、重置额度与每日明细集中在一页。
+所有已注册智能体的累计用量、按 2026-09-10 官方 API 单价估算的近 30 日费用、模型分布、每日 Token 热力图、趋势、重置额度与每日明细集中在一页。
 
 ![AI Token Ledger 总览](docs/assets/overview.png)
 
@@ -94,6 +94,7 @@ Grok Build 页面读取官方 CLI 会话中的 `turn_completed.usage`，自动�
 | 重点来源 | 可自行选择出现在导航、总览和预测页的 Provider；隐藏不停止后台刷新。 |
 | 耗尽预测 | 结合今日实时速度以及近 3 日、7 日速度，估计当前额度窗口的耗尽时间。 |
 | 模型等效 Token | 样本足够时，根据官方额度变化估计模型权重；API 价格不参与订阅额度换算。 |
+| API 费用估算 | 按 2026-09-10 各厂商官方 API 单价，从本地 Token 构成估算费用。Kimi 与 DeepSeek 保留人民币价，其余为美元；历史记录按当前价卡重算。 |
 | 日内重置识别 | 上午用完额度、午间重置、下午继续使用时，重置前后的 Token 会自动分段，避免污染拟合。 |
 | 重置 credits | Codex 与 Grok Build 页可显示 banked reset 的可用次数与本地时区有效期；不会在仪表盘内消耗。 |
 | 重置规划 | 对比等待自然恢复与使用 reset 的可支持 Token，展示逐张时间表、丢弃余额、三种消耗情景，以及有更多待办时的参考工作量。 |
@@ -266,7 +267,7 @@ flowchart LR
 
 | 页面 | 内容 |
 | --- | --- |
-| `总览` | 全部已注册来源的整体比较、总趋势、可滚动模型分布和每日总账。 |
+| `总览` | 全部已注册来源的整体比较、总趋势、按官方 API 单价估算的费用、可滚动模型分布、价表和每日总账。 |
 | `额度预测` | 全部支持额度同步的 Provider 的剩余额度、重置时间、速度与耗尽预测。 |
 | `重置规划` | 支持 banked reset 的来源的使用建议；与总览使用同一套数据源显示选择。 |
 | `Codex` | Codex 的每日趋势、缓存构成、费用、模型、快照、reset credits。 |
@@ -347,7 +348,19 @@ banked reset 通过 Grok Web 自身的 `ConsumerUiSvc/GetRemainingResets` 只读
 
 ### 订阅额度与 API 价格
 
-订阅额度的扣减可能受到模型、缓存命中、上下文规模和任务形态影响。API 价格适用于成本估算，与 Codex、Claude 或 Cursor 的订阅限额并非同一口径。模型等效 Token 的权重由账户额度变化估计，不使用 API 单价。
+订阅额度的扣减受到模型、缓存命中、上下文规模和任务形态影响。仪表盘费用数字来自 [`web/billing.js`](web/billing.js) 中截至 2026-09-10 的公开 API 单价。Kimi 与 DeepSeek 按人民币计算，其他条目按美元计算。模型等效 Token 的权重仍由账户额度变化估计，不使用 API 单价。
+
+价卡覆盖本机已经出现过的模型，以及各 Provider 当前可能写入账本的主要型号。缓存读取、缓存写入和输出分别计价；推理 token 是输出的子项，不重复计费。DeepSeek 采集器按每条请求的日志时间计算北京时间高峰价或空闲价。Grok、Gemini 和 OpenAI 的长上下文条件无法从日账本还原，因此使用标准价估算。价表和动态路由规则可通过 `/api/billing` 查看。
+
+| 厂商或服务 | 当前模型路由 | 价格来源 |
+| --- | --- | --- |
+| OpenAI | `gpt-6-astra`、`gpt-5.6-sol` / `gpt-5.6`、`gpt-5.6-terra`、`gpt-5.6-luna` | [OpenAI API Pricing](https://developers.openai.com/api/docs/pricing) |
+| Anthropic | `claude-fable-5-1`、`claude-opus-5`、`claude-sonnet-5`、`claude-haiku-4-5` | [Claude Pricing](https://platform.claude.com/docs/en/about-claude/pricing) |
+| Kimi | 开放平台使用 `kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`；Kimi Code 使用 `k3`、`k3-256k`、`kimi-for-coding`、`kimi-for-coding-highspeed` | [Kimi 开放平台](https://platform.kimi.com/)；[Kimi Code 模型配置](https://www.kimi.com/code/docs/kimi-code/models.html) |
+| DeepSeek | `deepseek-flash`；旧的 `deepseek-v4-flash` 路由已由 V4.1 Flash 提供服务；`deepseek-v4-pro` 将在北京时间 2026-09-14 12:00 转到 `deepseek-flash` | [DeepSeek 模型与价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/) |
+| xAI | `grok-4.6`、`grok-4.5`、`grok-4.3`、`grok-build-0.1` | [xAI API Pricing](https://docs.x.ai/developers/pricing) |
+| Cursor | `composer-2.5`、各 Fast 变体；Router 的模型 ID 为 `auto-smart`，费用按实际选中的模型计算 | [Cursor Models & Pricing](https://cursor.com/docs/models-and-pricing)；[Cursor Available Models](https://prod.cursor.com/help/models-and-usage/available-models) |
+| Google / Meta（Cursor） | `gemini-3.1-pro-preview`、`gemini-3.8-flash`、`muse-spark-1.3` | [Cursor Models & Pricing](https://cursor.com/docs/models-and-pricing) |
 
 ### 预测分层
 
@@ -742,12 +755,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\open-dashboard.ps1
 │  ├─ start-webui.ps1
 │  └─ sync-account-quotas.mjs
 ├─ tests/
+│  ├─ billing.test.js
 │  ├─ display-settings.test.js
 │  ├─ forecast-model.test.js
 │  ├─ provider-registry.test.js
 │  └─ update-check.test.js
 └─ web/
    ├─ app.js
+   ├─ billing.js
    ├─ forecast-model.js
    ├─ index.html
    └─ styles.css
@@ -760,6 +775,7 @@ npm test
 node --check server.js
 node --check web/app.js
 node --check web/forecast-model.js
+node --check web/billing.js
 ```
 
-测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤、Kimi CLI/桌面事件合并去重、OpenCode 多模型聚合、DeepSeek Harness 多 frame 解码与逐步骤去重、Grok 主会话筛选与分叉去重、Grok Build 缓存输入拆分与跨会话去重，以及显示设置的过滤与最少一个来源约束。
+测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤、Kimi CLI/桌面事件合并去重、OpenCode 多模型聚合、DeepSeek Harness 多 frame 解码与逐步骤去重、Grok 主会话筛选与分叉去重、Grok Build 缓存输入拆分与跨会话去重、显示设置的过滤与最少一个来源约束，以及按 2026-09-10 官方 API 单价和已公布路由规则估算费用。

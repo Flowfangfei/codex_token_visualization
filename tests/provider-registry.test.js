@@ -292,6 +292,49 @@ test("DeepSeek Harness final usage replaces stream usage and excludes other rout
   assert.equal(snapshot.daily[0].modelBreakdowns[0].modelName, "deepseek-official/deepseek-v4-pro");
 });
 
+test("DeepSeek Harness prices peak and off-peak from request timestamps", async () => {
+  const { aggregateDeepSeekHarnessEvents } = await import("../scripts/sync-account-quotas.mjs");
+  const snapshot = aggregateDeepSeekHarnessEvents([[
+    { type: "request/context", route: { provider: "deepseek-official", model: "deepseek-v4-flash" } },
+    {
+      type: "assistant/message",
+      key: "1:1",
+      time: Date.parse("2026-08-27T02:00:00.000Z"),
+      usage: {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 1_000_000,
+        totalCost: 0,
+      },
+    },
+    {
+      type: "assistant/message",
+      key: "1:2",
+      time: Date.parse("2026-08-27T05:30:00.000Z"),
+      usage: {
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 1_000_000,
+        totalCost: 0,
+      },
+    },
+  ]], "2026-08-27T08:00:00.000Z");
+
+  assert.equal(snapshot.costCurrency, "CNY");
+  assert.equal(snapshot.timedBilling, true);
+  assert.equal(snapshot.totals.peakCost, 2);
+  assert.equal(snapshot.totals.offPeakCost, 1);
+  assert.equal(snapshot.totals.totalCost, 3);
+  assert.equal(snapshot.daily[0].peakRequests, 1);
+  assert.equal(snapshot.daily[0].offPeakRequests, 1);
+});
+
 test("OpenCode assistant messages aggregate by day and provider-qualified model", async () => {
   const { aggregateOpenCodeUsageRecords } = await import("../scripts/sync-account-quotas.mjs");
   const snapshot = aggregateOpenCodeUsageRecords([

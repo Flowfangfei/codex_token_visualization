@@ -180,6 +180,7 @@
                 <p class="section-label" id="modelsLabel">Models</p>
                 <h2>模型分布</h2>
               </div>
+              <div class="pill" id="billingAsOfPill">API 单价</div>
             </div>
             <div class="model-list" id="modelList"></div>
           </article>
@@ -194,6 +195,34 @@
             </div>
             <div class="snapshot-list" id="snapshotList"></div>
           </article>
+        </section>
+
+        <section class="panel billing-panel" id="billingPanel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-label">API rate card</p>
+              <h2 id="billingTitle">官方 API 单价</h2>
+            </div>
+            <div class="pill" id="billingRatePill">2026-09-10</div>
+          </div>
+          <p class="billing-copy" id="billingNote">单价按每百万 token 列出，模型路由采用各厂商当前公开标识。</p>
+          <div class="table-scroll billing-scroll">
+            <table class="billing-table">
+              <thead>
+                <tr>
+                  <th>模型</th>
+                  <th>厂商</th>
+                  <th>模型路由</th>
+                  <th>输入</th>
+                  <th>缓存读取</th>
+                  <th>缓存写入</th>
+                  <th>输出</th>
+                  <th>说明</th>
+                </tr>
+              </thead>
+              <tbody id="billingRows"></tbody>
+            </table>
+          </div>
         </section>
 
         <section class="panel table-panel" id="tablePanel">
@@ -257,6 +286,7 @@
     <script src="/calendar-heatmap.js"></script>
     <script src="/reset-optimizer.js"></script>
     <script src="/reset-planner.js"></script>
+    <script src="/billing.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

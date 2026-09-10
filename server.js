@@ -11,6 +11,7 @@ const {
 } = require("./providers/registry.js");
 const { readDisplaySettings, writeDisplaySettings } = require("./lib/display-settings.js");
 const { checkForUpdate } = require("./lib/update-check.js");
+const Billing = require("./web/billing.js");
 
 const ROOT = __dirname;
 const WEB_ROOT = path.join(ROOT, "web");
@@ -706,6 +707,11 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    if (req.method === "GET" && req.url.startsWith("/api/billing")) {
+      sendJson(res, 200, { ok: true, ...Billing.catalog() });
+      return;
+    }
+
     if (req.url === "/api/display-settings") {
       if (req.method === "GET") {
         sendJson(res, 200, { ok: true, settings: readDisplaySettings(DISPLAY_SETTINGS_PATH, PROVIDERS) });
@@ -739,7 +745,7 @@ const server = http.createServer((req, res) => {
         sendJson(res, 400, { ok: false, error: "Unknown source" });
         return;
       }
-      sendJson(res, 200, latestUsageSnapshot(source));
+      sendJson(res, 200, Billing.annotateSnapshot(latestUsageSnapshot(source)));
       return;
     }
 

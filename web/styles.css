@@ -1429,6 +1429,30 @@ main {
   white-space: nowrap;
 }
 
+.model-value {
+  text-align: right;
+  line-height: 1.25;
+}
+
+.model-cost,
+.model-rate {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.model-cost {
+  display: block;
+  margin-top: 3px;
+}
+
+.model-rate {
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .reasoning-note {
   margin-top: 18px;
   padding: 12px;
@@ -1494,8 +1518,38 @@ main {
   font-size: 12px;
 }
 
-.table-panel {
+.table-panel,
+.billing-panel {
   padding-bottom: 8px;
+}
+
+.billing-copy {
+  margin: 0 0 14px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.billing-table {
+  min-width: 1180px;
+}
+
+.billing-table tr.is-used td {
+  background: rgba(193, 93, 62, 0.07);
+}
+
+.billing-table tr.is-route-rule td {
+  background: rgba(45, 101, 110, 0.055);
+}
+
+.billing-table code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.billing-scroll {
+  max-height: 360px;
 }
 
 .table-scroll {
