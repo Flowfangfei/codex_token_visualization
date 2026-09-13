@@ -140,6 +140,24 @@ test("fixed-schedule historical stress replay is reproducible and never leaks a 
   assert.ok(Math.abs(replayed.servedPercent - plan.servedPercent) < 1e-6);
 });
 
+test("censored stress days keep calendar gaps rather than becoming zeros or fake consecutive blocks", () => {
+  const input = { ...common, period: 7 * DAY, resetAt: now + 2 * DAY, remaining: 0 };
+  const plan = solve(input);
+  const history = Array.from({ length: 28 }, (_, i) => i % 2 ? null : 10e6);
+  const noBlocks = stressTest(input, plan.actions, history);
+  assert.equal(noBlocks.ready, false);
+  assert.equal(noBlocks.sampleDays, 14);
+  assert.equal(noBlocks.blockCount, 0);
+  assert.equal(noBlocks.excludedDays, 14);
+  const withGap = Array.from({ length: 28 }, (_, i) => i >= 10 && i <= 12 ? null : i % 4 ? 10e6 : 0);
+  const result = stressTest(input, plan.actions, withGap);
+  assert.equal(result.ready, true);
+  assert.equal(result.sampleDays, 25);
+  assert.equal(result.excludedDays, 3);
+  assert.equal(result.blockCount, 21);
+  assert.deepEqual(result, stressTest(input, plan.actions, withGap));
+});
+
 test("DP is never worse than the old beam search on an identical regular grid", () => {
   for (const remaining of [0, 30, 85]) for (const percentPerDay of [15, 45, 110]) {
     const input = { ...common, remaining, percentPerDay, end: now + 10 * DAY,

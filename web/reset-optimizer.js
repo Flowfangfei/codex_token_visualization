@@ -255,9 +255,15 @@
 
   // Historical daily blocks retain short runs of high/low days. Intraday bursts are assumptions.
   function stressTest(input, actions, history) {
-    const values = (history || []).filter((value) => Number.isFinite(value) && value >= 0).slice(-28);
-    if (values.length < 14 || values.filter((value) => value > 0).length < 4) return { ready: false, sampleDays: values.length };
-    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const values = (history || []).slice(-28).map((value) => Number.isFinite(value) && value >= 0 ? value : null);
+    const observed = values.filter((value) => value !== null);
+    const blocks = values.map((_, index) => index).filter((index) => index + 2 < values.length
+      && values.slice(index, index + 3).every((value) => value !== null));
+    const coverage = { sampleDays: observed.length, excludedDays: values.length - observed.length, blockCount: blocks.length };
+    if (observed.length < 14 || observed.filter((value) => value > 0).length < 4 || !blocks.length) {
+      return { ready: false, ...coverage };
+    }
+    const mean = observed.reduce((a, b) => a + b, 0) / observed.length;
     const cases = [];
     for (let sample = 0; sample < 8; sample += 1) {
       const burst = sample >= 4;
@@ -266,7 +272,7 @@
       const profile = [];
       let source = 0;
       for (let day = 0, time = input.now; time < input.end; day += 1, time += DAY) {
-        if (day % 3 === 0) source = Math.floor(random() * (values.length - 2));
+        if (day % 3 === 0) source = blocks[Math.floor(random() * blocks.length)];
         const rate = input.percentPerDay * values[source + day % 3] / mean;
         if (burst) profile.push({ until: Math.min(time + 6 * HOUR, input.end), percentPerDay: rate * 4 });
         if (!burst || time + 6 * HOUR < input.end) profile.push({ until: Math.min(time + DAY, input.end), percentPerDay: burst ? 0 : rate });
@@ -280,7 +286,7 @@
         unservedPercent: Math.max(0, demandCurve(scenario)(input.end) - result.servedPercent),
         reactiveAdvantagePercent: reactive.servedPercent - result.servedPercent });
     }
-    return { ready: true, sampleDays: values.length, cases,
+    return { ready: true, ...coverage, cases,
       minGainPercent: Math.min(...cases.map((entry) => entry.gainPercent)),
       maxGainPercent: Math.max(...cases.map((entry) => entry.gainPercent)),
       meanGainPercent: cases.reduce((sum, entry) => sum + entry.gainPercent, 0) / cases.length,

@@ -10,6 +10,9 @@ const {
 } = require("./providers/registry.js");
 const { readDisplaySettings, writeDisplaySettings } = require("./lib/display-settings.js");
 const { checkForUpdate } = require("./lib/update-check.js");
+const { useSystemCertificates, networkErrorMessage } = require("./lib/network.js");
+const { summarizeRefreshResults } = require("./lib/refresh-results.js");
+useSystemCertificates();
 
 const ROOT = __dirname;
 const WEB_ROOT = path.join(ROOT, "web");
@@ -227,6 +230,7 @@ async function fetchCodexResetCredits() {
   try {
     accessToken = readCodexAccessToken();
     const response = await fetch("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", {
+      signal: AbortSignal.timeout(15000),
       headers: {
         authorization: `Bearer ${accessToken}`,
       },
@@ -292,6 +296,37 @@ function storedGrokResetCredits() {
       expires_at_ms: Number(credit?.expires_at_ms) || null,
     })),
   };
+}
+
+const resetCreditsCache = new Map();
+const resetCreditsInFlight = new Map();
+
+async function readResetCredits(provider, force = false) {
+  const source = provider.id;
+  const cached = resetCreditsCache.get(source);
+  if (!force && cached && Date.now() - cached.at < 30000) return cached.payload;
+  if (resetCreditsInFlight.has(source)) return resetCreditsInFlight.get(source);
+  const pending = (async () => {
+    let payload;
+    try {
+      payload = source === "grok-build" ? storedGrokResetCredits() : await fetchCodexResetCredits();
+    } catch (error) {
+      payload = { ok: false, status: 502, message: networkErrorMessage(error) };
+    }
+    payload = { ...payload, source, source_label: provider.label,
+      planningPolicy: provider.resetPlanning ? {
+        cycleMode: provider.resetPlanning.cycleMode,
+        windowNames: provider.resetPlanning.windowNames,
+        creditTitles: provider.resetPlanning.creditTitles,
+      } : null,
+    };
+    // Share the same sanitized result between export completion and immediate rendering.
+    // A failed refresh replaces the cache; never present old inventory as fresh success.
+    resetCreditsCache.set(source, { at: Date.now(), payload });
+    return payload;
+  })();
+  resetCreditsInFlight.set(source, pending);
+  try { return await pending; } finally { resetCreditsInFlight.delete(source); }
 }
 
 function normalizeSource(value, fallback = "codex") {
@@ -393,7 +428,7 @@ function quotaSnapshots(source) {
 function refreshAccountSnapshots() {
   const script = path.join(ROOT, "scripts", "sync-account-quotas.mjs");
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, ["--no-warnings", script, "--json"], {
+    const child = spawn(process.execPath, ["--use-system-ca", "--no-warnings", script, "--json"], {
       cwd: ROOT,
       windowsHide: true,
     });
@@ -590,15 +625,19 @@ function runExport(req, res) {
           ...item,
           source: `${item.kind === "usage" ? "usage" : "quota"}:${item.source}`,
         }));
-        const combinedResults = [...result.results, ...quotaResults];
-        const succeeded = combinedResults.filter((item) => item.ok).length;
-        const ok = combinedResults.length > 0 && succeeded === combinedResults.length;
-        const partial = succeeded > 0 && succeeded < combinedResults.length;
-        sendJson(res, succeeded === 0 ? 500 : 200, {
+        if (!quotaResults.length && !quotaSync.ok) {
+          quotaResults.push({ source: "quota", ok: false, error: quotaSync.error || "Account quota sync failed" });
+        }
+        const resetResults = [];
+        for (const provider of PROVIDERS.filter((entry) => entry.resetCredits)) {
+          const payload = await readResetCredits(provider, true);
+          resetResults.push({ source: `reset:${provider.id}`, ok: payload.ok === true,
+            error: payload.ok ? null : payload.message || "Reset inventory unavailable" });
+        }
+        const summary = summarizeRefreshResults([...result.results, ...quotaResults, ...resetResults]);
+        sendJson(res, summary.ok || summary.partial ? 200 : 500, {
           ...result,
-          ok,
-          partial,
-          results: combinedResults,
+          ...summary,
           quotaSync,
         });
       })
@@ -760,22 +799,12 @@ const server = http.createServer((req, res) => {
         sendJson(res, 400, { ok: false, message: "Unknown reset-credit source" });
         return;
       }
-      const request = source === "grok-build"
-        ? Promise.resolve(storedGrokResetCredits())
-        : fetchCodexResetCredits();
-      request
-        .then((payload) => sendJson(res, payload.ok ? 200 : payload.status || 500, {
-          ...payload,
-          planningPolicy: provider.resetPlanning ? {
-            cycleMode: provider.resetPlanning.cycleMode,
-            windowNames: provider.resetPlanning.windowNames,
-            creditTitles: provider.resetPlanning.creditTitles,
-          } : null,
-        }))
+      readResetCredits(provider)
+        .then((payload) => sendJson(res, payload.ok ? 200 : payload.status || 500, payload))
         .catch((error) => {
           sendJson(res, 500, {
             ok: false,
-            message: error.message,
+            message: networkErrorMessage(error),
           });
         });
       return;

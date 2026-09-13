@@ -49,6 +49,14 @@ test("model calibration failures suppress numeric planning without discarding re
   }
 });
 
+test("unidentifiable censored demand does not become a low-demand reset recommendation", () => {
+  const result = planResets(input({ demand: { ready: false, adjusted: true }, dailyTokens: null }));
+  assert.equal(result.status, "sampling");
+  assert.equal(result.reason, "censored-demand-unavailable");
+  assert.equal(result.availableCount, 2);
+  assert.equal(result.plan, undefined);
+});
+
 test("reset inventory filters redeemed, unknown-scope and expired credits without retaining ids", () => {
   const result = inventory({ available_count: 4, credits: [
     credit(4, { id: "private" }), credit(2), credit(3, { title: "Partial reset" }), credit(-1),

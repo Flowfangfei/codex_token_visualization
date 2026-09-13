@@ -348,6 +348,54 @@ test("Codex quota sync supports an explicit CLI path override", async () => {
   }), "D:\\tools\\codex.exe");
 });
 
+test("Codex quota sync resolves native executables from Windows Path", async () => {
+  const { codexAppServerInvocation } = await import("../scripts/sync-account-quotas.mjs");
+  const executable = "D:\\Codex CLI\\codex.exe";
+  assert.deepEqual(codexAppServerInvocation({ platform: "win32",
+    env: { Path: 'C:\\missing;"D:\\Codex CLI"' },
+    pathExists: (candidate) => candidate === executable,
+  }), { command: executable, args: ["app-server", "--stdio"] });
+});
+
+test("Codex quota sync discovers the newest desktop CLI without an inherited PATH", async () => {
+  const { codexAppServerInvocation } = await import("../scripts/sync-account-quotas.mjs");
+  const bin = "C:\\Users\\example\\AppData\\Local\\OpenAI\\Codex\\bin";
+  const executable = `${bin}\\new-cli\\codex.exe`;
+  const options = { platform: "win32", env: {
+    LOCALAPPDATA: "C:\\Users\\example\\AppData\\Local",
+    PATH: "C:\\stale-cli", CODEX_CLI_PATH: "C:\\removed\\codex.exe",
+  },
+  readDirectory: (directory) => {
+    assert.equal(directory, bin);
+    return ["old-cli", "new-cli", "rg-only", "removed-cli"].map((name) => ({ name, isDirectory: () => true }));
+  },
+  pathExists: (candidate) => candidate.startsWith(bin) && !candidate.includes("rg-only"),
+  fileStat: (candidate) => {
+    if (candidate.includes("removed-cli")) throw new Error("Removed during update");
+    return { isFile: () => true, mtimeMs: candidate === executable ? 20 : 10 };
+  } };
+  assert.deepEqual(codexAppServerInvocation(options), { command: executable, args: ["app-server", "--stdio"] });
+});
+
+test("Codex quota sync handles missing desktop installs and does not discover packaged WindowsApps executables", async () => {
+  const { resolveCodexCliPath } = await import("../scripts/sync-account-quotas.mjs");
+  assert.equal(resolveCodexCliPath({ platform: "win32",
+    env: { LOCALAPPDATA: "C:\\missing", PATH: "C:\\Program Files\\WindowsApps\\OpenAI.Codex\\resources" },
+    pathExists: (candidate) => candidate.endsWith("codex.exe"),
+    readDirectory: () => { throw new Error("ENOENT"); },
+  }), "codex");
+  assert.equal(resolveCodexCliPath({ platform: "linux", env: {}, pathExists: () => false }), "codex");
+});
+
+test("Codex quota sync keeps npm shims ahead of desktop fallback", async () => {
+  const { resolveCodexCliPath } = await import("../scripts/sync-account-quotas.mjs");
+  assert.equal(resolveCodexCliPath({ platform: "win32",
+    env: { APPDATA: "C:\\Roaming", LOCALAPPDATA: "C:\\Local" },
+    pathExists: (candidate) => candidate === "C:\\Roaming\\npm\\codex.cmd",
+    readDirectory: () => { assert.fail("Desktop scan should not run when a shim exists"); },
+  }), "C:\\Roaming\\npm\\codex.cmd");
+});
+
 test("Claude OAuth refresh rotates credentials without dropping unrelated fields", async () => {
   const { refreshClaudeCredential } = await import("../scripts/sync-account-quotas.mjs");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "token-ledger-claude-"));

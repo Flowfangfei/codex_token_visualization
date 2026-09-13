@@ -48,7 +48,7 @@ foreach ($Source in $Sources) {
 
 if (Test-Path $QuotaScript) {
   try {
-    & node --no-warnings $QuotaScript --json
+    & node --use-system-ca --no-warnings $QuotaScript --json
     if ($LASTEXITCODE -ne 0) {
       throw "account quota sync failed with exit code $LASTEXITCODE"
     }
