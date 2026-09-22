@@ -1303,16 +1303,136 @@ function renderMetrics(days, totals, view, bundle = {}) {
   renderMetric("费用估算", formatCost(totalCost), "本地 JSONL 统计，不等同订阅额度");
 }
 
-function renderTrend(days, label) {
-  els.trendChart.replaceChildren();
+const trendRange = document.querySelector("#trendRange");
+const trendStart = document.querySelector("#trendStart");
+const trendEnd = document.querySelector("#trendEnd");
+let trendSettings = { mode: "line", range: "30", start: "", end: "" };
+try {
+  const saved = JSON.parse(localStorage.getItem("ledger-trend") || "null");
+  if (saved && ["line", "heatmap"].includes(saved.mode)
+    && ["30", "90", "180", "365", "all", "custom"].includes(saved.range)) trendSettings = saved;
+} catch (_) { /* Storage can be disabled by browser policy. */ }
+let trendSource = { days: [], label: "" };
+trendRange.value = trendSettings.range;
+trendStart.value = trendSettings.start || addDays(localDateKey(), -29);
+trendEnd.value = trendSettings.end || localDateKey();
 
-  if (!days.length) {
-    els.rangePill.textContent = "--";
+function updateTrend() {
+  trendSettings = { ...trendSettings, range: trendRange.value, start: trendStart.value, end: trendEnd.value };
+  try { localStorage.setItem("ledger-trend", JSON.stringify(trendSettings)); } catch (_) { /* Optional preference. */ }
+  renderTrend(trendSource.days, trendSource.label);
+}
+document.querySelectorAll("[data-trend-mode]").forEach((button) => button.addEventListener("click", () => {
+  trendSettings.mode = button.dataset.trendMode;
+  updateTrend();
+}));
+[trendRange, trendStart, trendEnd].forEach((control) => control.addEventListener("change", updateTrend));
+
+function renderHeatmap(selection, label) {
+  const wrap = document.createElement("div");
+  wrap.className = "heatmap-scroll";
+  const calendar = document.createElement("div");
+  calendar.className = "heatmap-calendar";
+  const weeks = Math.ceil((selection.offset + selection.rows.length) / 7);
+  calendar.style.setProperty("--weeks", weeks);
+  const months = document.createElement("div");
+  months.className = "heatmap-months";
+  let lastMonthColumn = -10;
+  selection.rows.forEach((row, index) => {
+    const column = Math.floor((index + selection.offset) / 7);
+    if ((index === 0 || row.date.endsWith("-01")) && column - lastMonthColumn >= 4) {
+      const month = document.createElement("span");
+      month.textContent = `${row.date.slice(0, 4)}/${row.date.slice(5, 7)}`;
+      month.style.gridColumn = `${column + 1} / span 4`;
+      months.appendChild(month);
+      lastMonthColumn = column;
+    }
+  });
+  const grid = document.createElement("div");
+  grid.className = "heatmap-grid";
+  grid.setAttribute("role", "group");
+  grid.setAttribute("aria-label", `${label}每日 Token 热力图`);
+  const detail = document.createElement("p");
+  detail.className = "heatmap-detail";
+  detail.setAttribute("aria-live", "polite");
+  const buttons = [];
+  const describe = (row) => row.recorded
+    ? `${row.date} · ${formatNumber(row.totalTokens)} Token · ${formatCost(row.costUSD)}`
+    : `${row.date} · 无用量记录`;
+  for (let i = 0; i < selection.offset; i++) grid.appendChild(document.createElement("span"));
+  selection.rows.forEach((row, index) => {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "heatmap-cell";
+    cell.dataset.level = TrendData.level(row.totalTokens, selection.max);
+    cell.title = describe(row);
+    cell.setAttribute("aria-label", describe(row));
+    cell.tabIndex = index === selection.rows.length - 1 ? 0 : -1;
+    const inspect = () => {
+      detail.textContent = describe(row);
+      buttons.forEach((button) => { button.tabIndex = button === cell ? 0 : -1; });
+    };
+    cell.addEventListener("focus", inspect);
+    cell.addEventListener("mouseenter", () => { detail.textContent = describe(row); });
+    cell.addEventListener("click", inspect);
+    cell.addEventListener("keydown", (event) => {
+      const offset = { ArrowLeft: -7, ArrowRight: 7, ArrowUp: -1, ArrowDown: 1 }[event.key];
+      if (offset === undefined) return;
+      event.preventDefault();
+      buttons[Math.max(0, Math.min(buttons.length - 1, index + offset))]?.focus();
+    });
+    buttons.push(cell);
+    grid.appendChild(cell);
+  });
+  detail.textContent = describe(selection.rows.at(-1));
+  const weekdays = document.createElement("div");
+  weekdays.className = "heatmap-weekdays";
+  ["一", "", "三", "", "五", "", "日"].forEach((day) => {
+    const span = document.createElement("span"); span.textContent = day; weekdays.appendChild(span);
+  });
+  calendar.append(months, weekdays, grid);
+  wrap.appendChild(calendar);
+  const legend = document.createElement("div");
+  legend.className = "heatmap-legend";
+  legend.textContent = "每日 Token ";
+  ["missing", "0", "1", "2", "3", "4"].forEach((level, index) => {
+    const item = document.createElement("span");
+    const swatch = document.createElement("i");
+    swatch.className = "heatmap-cell";
+    swatch.dataset.level = level;
+    item.append(swatch, document.createTextNode(index === 0 ? "无记录" : index === 1 ? "0" : `≤ ${formatCompact(selection.max * (index - 1) / 4)}`));
+    legend.appendChild(item);
+  });
+  els.trendChart.append(wrap, legend, detail);
+  wrap.scrollLeft = wrap.scrollWidth;
+}
+
+function renderTrend(days, label) {
+  trendSource = { days, label };
+  els.trendChart.replaceChildren();
+  document.querySelector("#trendDates").hidden = trendSettings.range !== "custom";
+  document.querySelectorAll("[data-trend-mode]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.trendMode === trendSettings.mode));
+  });
+  const selection = TrendData.select(days.map((day) => ({ date: dayKey(day), totalTokens: day.totalTokens, costUSD: dayCost(day) })),
+    { ...trendSettings, start: trendStart.value, end: trendEnd.value }, localDateKey());
+  document.querySelector("#trendSummary").textContent = selection.error || `${formatCompact(selection.total)} Token · ${selection.recordedDays} 个记录日 / ${selection.rows.length} 天`;
+  els.rangePill.textContent = selection.error ? "--" : `${selection.start} - ${selection.end}`;
+  if (selection.error) {
+    els.trendChart.appendChild(emptyState(selection.error));
+    return;
+  }
+  if (trendSettings.mode === "heatmap") {
+    renderHeatmap(selection, label);
+    return;
+  }
+
+  if (!selection.recordedDays) {
     els.trendChart.appendChild(emptyState("暂无趋势数据"));
     return;
   }
 
-  const recent = days.slice(-24);
+  const recent = selection.rows;
   const maxTokens = Math.max(...recent.map((day) => Number(day.totalTokens) || 0), 1);
   const maxCost = Math.max(...recent.map(dayCost), 1);
   const width = 900;
@@ -1330,14 +1450,6 @@ function renderTrend(days, label) {
     const y = top + chartHeight - ((Number(day.totalTokens) || 0) / maxTokens) * chartHeight;
     return { x, y, day };
   });
-
-  const polyline = points.map((point) => `${point.x},${point.y}`).join(" ");
-  const area = [
-    `M ${points[0].x} ${top + chartHeight}`,
-    ...points.map((point) => `L ${point.x} ${point.y}`),
-    `L ${points.at(-1).x} ${top + chartHeight}`,
-    "Z",
-  ].join(" ");
 
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "trend-svg");
@@ -1368,14 +1480,15 @@ function renderTrend(days, label) {
     const costHeight = (dayCost(day) / maxCost) * (chartHeight * 0.42);
     const bar = document.createElementNS(svg.namespaceURI, "rect");
     bar.setAttribute("class", "cost-bar");
-    bar.setAttribute("x", x - 7);
+    const barWidth = Math.max(0.5, Math.min(14, step * 0.6));
+    bar.setAttribute("x", x - barWidth / 2);
     bar.setAttribute("y", top + chartHeight - costHeight);
-    bar.setAttribute("width", 14);
+    bar.setAttribute("width", barWidth);
     bar.setAttribute("height", costHeight);
     bar.setAttribute("rx", 3);
     svg.appendChild(bar);
 
-    if (index === 0 || index === recent.length - 1 || index % 5 === 0) {
+    if (index === 0 || index === recent.length - 1 || (index % Math.ceil(recent.length / 5) === 0 && index < recent.length - Math.ceil(recent.length / 10))) {
       const text = document.createElementNS(svg.namespaceURI, "text");
       text.setAttribute("class", "point-label");
       text.setAttribute("x", x);
@@ -1386,22 +1499,32 @@ function renderTrend(days, label) {
     }
   });
 
-  const pathArea = document.createElementNS(svg.namespaceURI, "path");
-  pathArea.setAttribute("class", "chart-area");
-  pathArea.setAttribute("d", area);
-  svg.appendChild(pathArea);
+  const segments = [];
+  let segment = [];
+  for (const point of points) {
+    if (point.day.recorded) segment.push(point);
+    else if (segment.length) { segments.push(segment); segment = []; }
+  }
+  if (segment.length) segments.push(segment);
+  for (const group of segments) {
+    const pathArea = document.createElementNS(svg.namespaceURI, "path");
+    pathArea.setAttribute("class", "chart-area");
+    pathArea.setAttribute("d", `M ${group[0].x} ${top + chartHeight} ${group.map((point) => `L ${point.x} ${point.y}`).join(" ")} L ${group.at(-1).x} ${top + chartHeight} Z`);
+    svg.appendChild(pathArea);
 
-  const line = document.createElementNS(svg.namespaceURI, "polyline");
-  line.setAttribute("class", "chart-line");
-  line.setAttribute("points", polyline);
-  svg.appendChild(line);
+    const line = document.createElementNS(svg.namespaceURI, "polyline");
+    line.setAttribute("class", "chart-line");
+    line.setAttribute("points", group.map((point) => `${point.x},${point.y}`).join(" "));
+    svg.appendChild(line);
+  }
 
   points.forEach((point) => {
+    if (!point.day.recorded) return;
     const dot = document.createElementNS(svg.namespaceURI, "circle");
     dot.setAttribute("class", "dot");
     dot.setAttribute("cx", point.x);
     dot.setAttribute("cy", point.y);
-    dot.setAttribute("r", 4);
+    dot.setAttribute("r", recent.length > 90 ? 1.5 : 4);
     svg.appendChild(dot);
 
     const title = document.createElementNS(svg.namespaceURI, "title");

@@ -123,6 +123,22 @@
               </div>
               <div class="pill" id="rangePill">--</div>
             </div>
+            <div class="trend-controls">
+              <div class="trend-modes" role="group" aria-label="趋势图类型">
+                <button type="button" data-trend-mode="line" aria-pressed="true">折线</button>
+                <button type="button" data-trend-mode="heatmap" aria-pressed="false">热力图</button>
+              </div>
+              <select id="trendRange" aria-label="趋势时间范围">
+                <option value="30">近 30 天</option><option value="90">近 90 天</option>
+                <option value="180">近 180 天</option><option value="365">近一年</option>
+                <option value="all">全部记录</option><option value="custom">自定义</option>
+              </select>
+              <div id="trendDates" class="trend-dates" hidden>
+                <label>从 <input id="trendStart" type="date" aria-label="趋势开始日期"></label>
+                <label>至 <input id="trendEnd" type="date" aria-label="趋势结束日期"></label>
+              </div>
+            </div>
+            <p id="trendSummary" class="trend-summary" aria-live="polite"></p>
             <div class="chart-wrap" id="trendChart"></div>
           </article>
 
@@ -232,6 +248,7 @@
     <script src="/forecast-demand.js"></script>
     <script src="/reset-optimizer.js"></script>
     <script src="/reset-planner.js"></script>
+    <script src="/trend-data.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>
