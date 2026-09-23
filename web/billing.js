@@ -34,6 +34,18 @@
 
   const RATES = Object.freeze([
     rate({
+      id: "volcengine/glm-5-3-flash-260828",
+      vendor: "volcengine",
+      label: "GLM-5.3-Flash · 智谱直连参考价",
+      currency: "CNY",
+      routes: ["volcengine/glm-5-3-flash-260828"],
+      input: 0.8,
+      cacheRead: 0.23,
+      output: 2.8,
+      note: "按智谱官方 API 直连标准价估算，单位为元/百万 Token；2026-09-21 核验，不含限时折扣。实际调用路由仍为火山方舟，此处不表示方舟实际扣款。",
+      source: "https://bigmodel.cn/pricing",
+    }),
+    rate({
       id: "gpt-6-astra",
       vendor: "openai",
       label: "GPT-6 Astra",
@@ -488,7 +500,19 @@
     return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(normalized);
   }
 
-  function matchRate(modelName) {
+  function matchRate(modelName, billingProvider) {
+    const route = stripDisplayPrefix(modelName).trim().toLowerCase();
+    if (billingProvider) {
+      // OpenCode custom provider names are local aliases, not model vendors.
+      const model = route.includes("/") ? route.slice(route.indexOf("/") + 1) : route;
+      const scoped = RATES.find((entry) => entry.id === `${billingProvider}/${model}`);
+      if (scoped) return scoped;
+      const vendor = { openai: "openai", anthropic: "anthropic", deepseek: "deepseek", "deepseek-official": "deepseek", xai: "xai", moonshot: "moonshot", moonshotai: "moonshot" }[billingProvider];
+      return vendor ? RATES.find((entry) => entry.vendor === vendor && entry.routes.includes(model)) || null : null;
+    }
+    if (route.startsWith("volcengine/")) {
+      return RATES.find((entry) => entry.id === route) || null;
+    }
     const normalized = normalizeModelName(modelName);
     if (!normalized) return null;
     for (const matcher of MATCHERS) {
@@ -570,15 +594,15 @@
 
   function estimateUsageCost(usage, modelName = usage?.modelName || usage?.name, options = {}) {
     const parts = usageParts(usage);
-    const matched = matchRate(modelName);
+    const matched = matchRate(modelName, usage?.billingProvider);
     const name = String(modelName || usage?.modelName || usage?.name || "unknown-model");
     if (!matched) {
       return {
         modelName: name,
         rate: null,
-        amount: 0,
+        amount: usage?.billingProvider ? recordedCost(usage) : 0,
         currency: "USD",
-        usd: 0,
+        usd: usage?.billingProvider ? recordedCost(usage) : 0,
         window: "off_peak",
         matched: false,
         ...parts,
@@ -681,13 +705,16 @@
     );
     const matchedTokens = details.reduce((sum, item) => sum + (item.matched ? item.tokens : 0), 0);
     const unmatchedTokens = details.reduce((sum, item) => sum + (item.matched ? 0 : item.tokens), 0);
-    const priced = details.reduce((sum, item) => sum + (item.matched ? item.amount : 0), 0);
-    const currency = details.find((item) => item.matched)?.currency || "USD";
+    const currencies = new Set(details.filter((item) => item.matched).map((item) => item.currency));
+    const currency = currencies.size === 1 ? [...currencies][0] : "USD";
+    if (details.some((item) => !item.matched && item.usd > 0)) currencies.add("USD");
+    const totalCurrency = currencies.size === 1 ? [...currencies][0] : "USD";
+    const priced = details.reduce((sum, item) => sum + (currencies.size > 1 ? item.usd : item.amount), 0);
     const amount = matchedTokens > 0 ? priced : recordedCost(day);
     return {
       amount,
-      currency,
-      usd: toUsd(amount, currency),
+      currency: totalCurrency,
+      usd: toUsd(amount, totalCurrency),
       matched: matchedTokens > 0,
       timed: false,
       matchedTokens,
@@ -785,6 +812,7 @@
   }
 
   const VENDOR_LABELS = Object.freeze({
+    volcengine: "火山方舟",
     openai: "OpenAI",
     anthropic: "Anthropic",
     moonshot: "Moonshot",
@@ -839,6 +867,7 @@
       return {
         ...day,
         estimatedCostUSD: roundUsd(estimated.usd),
+        unpricedTokens: estimated.unmatchedTokens,
         estimatedCostCNY: estimated.currency === "CNY" ? roundUsd(estimated.amount) : undefined,
       };
     });

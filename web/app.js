@@ -337,6 +337,9 @@ function costCurrency(days, totals) {
 }
 
 function billingCaption(days = []) {
+  const unpriced = days.reduce((sum, day) => sum + Billing.estimateDayCost(day).unmatchedTokens, 0);
+  if (unpriced) return `已核价部分估算；另有 ${formatCompact(unpriced)} Token 待核价`;
+  if (days.some((day) => dayModels(day).some((model) => model.billingProvider))) return "按服务商与完整模型路由估算，来源与核验日期见价表";
   const timed = days.some((day) => day?.timedBilling || day?.costCurrency === "CNY");
   if (timed) return `按 ${Billing.PRICE_AS_OF} 官方价卡、请求时间峰谷计价`;
   return `按 ${Billing.PRICE_AS_OF} 官方 API 单价估算，不等同订阅额度`;
@@ -402,7 +405,7 @@ const FORECAST_AGENT_META = {};
 
 function localDateKey(date = new Date()) {
   const pad = (value) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
 function dayKey(day) {
@@ -430,9 +433,9 @@ function dayDistance(from, to) {
 
 function formatDateKey(value) {
   if (!value) return "--";
-  const date = new Date(`${value}T12:00:00`);
+  const date = new Date(`${value}T12:00:00+08:00`);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString("zh-CN", { month: "short", day: "numeric" });
+  return date.toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai", month: "short", day: "numeric" });
 }
 
 function formatRunway(days) {
@@ -497,7 +500,7 @@ function buildForecastRate(days, fallbackDailyTokens) {
   const today = localDateKey();
   const todayUsage = usageForDateRange(days, today, today);
   const now = new Date();
-  const elapsedHours = Math.max(1, now.getHours() + now.getMinutes() / 60 + now.getSeconds() / 3600);
+  const elapsedHours = Math.max(1, ((now.getTime() + 8 * 3600000) % 86400000) / 3600000);
   const todayRate = todayUsage > 0 ? (todayUsage / elapsedHours) * 24 : null;
   const threeDayStart = addDays(today, -2);
   const sevenDayStart = addDays(today, -6);
@@ -899,7 +902,7 @@ function formatAccountTime(value) {
   if (!value) return "--";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "--";
-  return date.toLocaleString("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function formatAccountWindow(windowDurationMins) {
@@ -1334,7 +1337,8 @@ function renderMetrics(days, totals, view, bundle = {}) {
     const recentTotal = sumRecent(days, (day) => Number(day.totalTokens) || 0, 30);
     const sourceCount = Object.values(bundle).filter((snapshot) => snapshot?.latestFile).length;
 
-    renderMetric("今日总用量", formatCompact(latestTotal), `${dayDate(latest)} · ${formatCost(dayCost(latest))}`);
+    const today = days.find((day) => dayKey(day) === localDateKey());
+    renderMetric("今日总用量", formatCompact(Number(today?.totalTokens) || 0), `${localDateKey()} · ${formatCost(today ? dayCost(today) : 0)}`);
     renderMetric("累计 Token", formatCompact(totalTokenCount), `最近 30 条记录 ${formatCompact(recentTotal)}`);
     renderMetric("近 30 日费用", formatCost(recentCost), `累计 ${formatCost(totalCost)} · ${billingCaption(days)}`);
     renderMetric("活跃来源", `${sourceCount || activeAgentCount(days)} 个`, visibleProviders().map((entry) => entry.shortLabel || entry.label).join(" / "));
@@ -1631,7 +1635,7 @@ function renderModels(days) {
     row.className = "model-row";
     const rateText = model.matched
       ? `${escapeHtml(model.rate.label)} · ${escapeHtml(Billing.formatRateLabel(model.rate))}`
-      : "无公开单价";
+      : model.usd > 0 ? "OpenCode 记录费用；单价待核验" : "该服务商路由待核价";
     row.innerHTML = `
       <div class="model-main">
         <div class="model-name">${escapeHtml(model.name)}</div>
@@ -1642,7 +1646,7 @@ function renderModels(days) {
       </div>
       <div class="model-value">
         ${formatCompact(model.total)}
-        <span class="model-cost">${formatCost(model.amount || model.usd, model.currency || "USD")}</span>
+        <span class="model-cost">${model.matched || model.usd > 0 ? formatCost(model.amount || model.usd, model.currency || "USD") : "待核价"}</span>
       </div>
     `;
     els.modelList.appendChild(row);
@@ -1655,7 +1659,7 @@ function renderBillingRates(view, days) {
   const routes = Billing.routesForProvider(view);
   const used = Billing.usedRateIds(days);
   els.billingRatePill.textContent = `${Billing.PRICE_AS_OF} · ${rates.length} 个型号 · ${routes.length} 条路由`;
-  els.billingTitle.textContent = view === "overview" ? "全部官方 API 单价" : `${(VIEW_CONFIGS[view] || {}).label || "官方"} API 单价`;
+  els.billingTitle.textContent = view === "overview" ? "API 参考单价" : `${(VIEW_CONFIGS[view] || {}).label || "模型"} API 参考单价`;
   const hasCny = rates.some((rate) => rate.currency === "CNY");
   els.billingNote.textContent = used.size
     ? `单价为每百万 token。Kimi 与 DeepSeek 为人民币价，其余为美元。当前账本用到 ${used.size} 个型号，已在表中标出。`
@@ -1664,6 +1668,10 @@ function renderBillingRates(view, days) {
       : "单价为每百万 token 的美元价，用来估算本地 Token 成本。当前页还没有对上账本里的型号。";
 
   els.billingRows.replaceChildren();
+  if (view === "opencode") {
+    els.billingNote.textContent = "按完整模型路由匹配；GLM-5.3-Flash 使用智谱官方 API 直连人民币标准价估算，2026-09-21 核验，不含限时折扣。实际调用仍走方舟；未核价版本保留 Token 记录并标注待核价。";
+    els.billingRatePill.textContent = "路由价格核验：2026-09-21";
+  }
   rates.forEach((rate) => {
     const row = document.createElement("tr");
     if (used.has(rate.id)) row.className = "is-used";
@@ -1716,7 +1724,7 @@ function renderSnapshots(data) {
     row.innerHTML = `
       <div class="snapshot-main">
         <div class="snapshot-name">${index === 0 ? "Latest · " : ""}${escapeHtml(file.name)}</div>
-        <div class="snapshot-date">${new Date(file.modifiedAt).toLocaleString("zh-CN")}</div>
+        <div class="snapshot-date">${new Date(file.modifiedAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}</div>
       </div>
       <div class="snapshot-meta">${formatBytes(file.size)}</div>
     `;

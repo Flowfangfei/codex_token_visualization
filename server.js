@@ -172,7 +172,7 @@ function localDateTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
 
-  const offsetMinutes = -date.getTimezoneOffset();
+  const offsetMinutes = 480;
   const sign = offsetMinutes >= 0 ? "+" : "-";
   const absOffset = Math.abs(offsetMinutes);
   const offsetHours = String(Math.floor(absOffset / 60)).padStart(2, "0");
@@ -180,8 +180,8 @@ function localDateTime(value) {
   const pad = (number) => String(number).padStart(2, "0");
 
   return [
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
-    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+    new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(date),
+    new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(date),
     `GMT${sign}${offsetHours}:${offsetMins}`,
   ].join(" ");
 }
@@ -499,7 +499,7 @@ function exportUsageSnapshot(source = "codex") {
   const promise = new Promise((resolve, reject) => {
     const child = spawn(
       shell,
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Source", normalizedSource],
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Source", normalizedSource, "-Timezone", "Asia/Shanghai"],
       { cwd: ROOT, windowsHide: true }
     );
 

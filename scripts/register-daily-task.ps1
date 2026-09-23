@@ -1,7 +1,7 @@
 param(
   [string]$TaskName = "AITokenLedgerDailyExport",
   [string]$At = "12:00",
-  [string]$Timezone = "Asia/Tokyo",
+  [string]$Timezone = "Asia/Shanghai",
   [switch]$Force
 )
 

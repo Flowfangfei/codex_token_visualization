@@ -54,10 +54,10 @@ function recomputeTotals(daily, snapshots, current) {
 function normalizeUsageDate(value) {
   const text = String(value || "").trim();
   if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
-  const date = new Date(text);
+  const date = new Date(/^[A-Za-z]+ \d{1,2}, \d{4}$/.test(text) ? `${text} 12:00:00 GMT+0800` : text);
   if (Number.isNaN(date.getTime())) return null;
   const pad = (part) => String(part).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
 export function mergeUsageSnapshotHistory(snapshots, current) {

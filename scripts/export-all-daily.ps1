@@ -1,5 +1,5 @@
 param(
-  [string]$Timezone = "Asia/Tokyo",
+  [string]$Timezone = "Asia/Shanghai",
   [string]$FileDate
 )
 

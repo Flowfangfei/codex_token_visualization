@@ -35,7 +35,7 @@ const MAX_QUOTA_OBSERVATIONS = STORAGE_RETENTION_DAYS * 96;
 
 function localDateKey(date = new Date()) {
   const pad = (value) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
 function readJson(filePath) {
@@ -160,6 +160,7 @@ export function aggregateOpenCodeUsageRecords(records, generatedAt = new Date().
     };
     for (const field of fields) day[field] += numberOrZero(record[field]);
     const model = day.models.get(record.modelName) || Object.fromEntries(fields.map((field) => [field, 0]));
+    if (record.billingProvider) model.billingProvider = record.billingProvider;
     for (const field of fields) model[field] += numberOrZero(record[field]);
     day.models.set(record.modelName, model);
     byDay.set(record.date, day);
@@ -207,6 +208,12 @@ export function readOpenCodeUsage(databasePath = openCodeDatabasePath()) {
                tokens_cache_read, tokens_cache_write, time_created
         from session order by time_created
       `).all().map(openCodeSessionRecord).filter(Boolean);
+    }
+    const routePath = process.env.OPENCODE_BILLING_ROUTES_PATH || join(USAGE_ROOT, "opencode-billing-routes.json");
+    const routeConfig = existsSync(routePath) ? readJson(routePath) : {};
+    for (const record of records) {
+      const providerId = record.modelName.split("/")[0];
+      record.billingProvider = routeConfig.providers?.[providerId] || providerId;
     }
     return { ...aggregateOpenCodeUsageRecords(records), recordSource };
   } finally {

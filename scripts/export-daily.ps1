@@ -1,6 +1,6 @@
 param(
   [string]$Source = "codex",
-  [string]$Timezone = "Asia/Tokyo",
+  [string]$Timezone = "Asia/Shanghai",
   [string]$OutputRoot,
   [string]$FileDate
 )
