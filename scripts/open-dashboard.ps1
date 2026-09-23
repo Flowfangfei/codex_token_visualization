@@ -78,7 +78,7 @@ Stop-ExistingDashboard -LocalPort $Port -BaseUrl $Url
 $nodePath = (Get-Command node).Source
 $process = Start-Process `
   -FilePath $nodePath `
-  -ArgumentList @(".\server.js", "--port", "$Port") `
+  -ArgumentList @("--use-system-ca", ".\server.js", "--port", "$Port") `
   -WorkingDirectory $ProjectRoot `
   -WindowStyle Hidden `
   -PassThru

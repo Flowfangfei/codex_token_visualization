@@ -112,30 +112,6 @@
 
         <section class="metric-grid" id="metricGrid"></section>
 
-        <section class="panel calendar-heatmap-panel" id="calendarHeatmapPanel" aria-live="polite">
-          <div class="panel-heading">
-            <div>
-              <p class="section-label">Activity calendar</p>
-              <h2>每日 Token 热力图</h2>
-            </div>
-            <div class="pill" id="heatmapRangePill">--</div>
-          </div>
-          <div class="calendar-heatmap-meta">
-            <p id="heatmapSummary">正在读取每日用量...</p>
-            <div class="calendar-heatmap-legend" aria-label="颜色越深表示当日 Token 用量越高">
-              <span>少</span>
-              <i class="calendar-heatmap-cell level-0" aria-hidden="true"></i>
-              <i class="calendar-heatmap-cell level-1" aria-hidden="true"></i>
-              <i class="calendar-heatmap-cell level-2" aria-hidden="true"></i>
-              <i class="calendar-heatmap-cell level-3" aria-hidden="true"></i>
-              <i class="calendar-heatmap-cell level-4" aria-hidden="true"></i>
-              <span>多</span>
-            </div>
-          </div>
-          <div class="calendar-heatmap-scroll">
-            <div class="calendar-heatmap" id="calendarHeatmap" role="img" aria-label="每日 Token 用量日历热力图"></div>
-          </div>
-        </section>
 
         <section class="source-compare" id="sourceCompare"></section>
 
@@ -148,6 +124,22 @@
               </div>
               <div class="pill" id="rangePill">--</div>
             </div>
+            <div class="trend-controls">
+              <div class="trend-modes" role="group" aria-label="趋势图类型">
+                <button type="button" data-trend-mode="line" aria-pressed="true">折线</button>
+                <button type="button" data-trend-mode="heatmap" aria-pressed="false">热力图</button>
+              </div>
+              <select id="trendRange" aria-label="趋势时间范围">
+                <option value="30">近 30 天</option><option value="90">近 90 天</option>
+                <option value="180">近 180 天</option><option value="365">近一年</option>
+                <option value="all">全部记录</option><option value="custom">自定义</option>
+              </select>
+              <div id="trendDates" class="trend-dates" hidden>
+                <label>从 <input id="trendStart" type="date" aria-label="趋势开始日期"></label>
+                <label>至 <input id="trendEnd" type="date" aria-label="趋势结束日期"></label>
+              </div>
+            </div>
+            <p id="trendSummary" class="trend-summary" aria-live="polite"></p>
             <div class="chart-wrap" id="trendChart"></div>
           </article>
 
@@ -283,9 +275,10 @@
     </dialog>
 
     <script src="/forecast-model.js"></script>
-    <script src="/calendar-heatmap.js"></script>
+    <script src="/forecast-demand.js"></script>
     <script src="/reset-optimizer.js"></script>
     <script src="/reset-planner.js"></script>
+    <script src="/trend-data.js"></script>
     <script src="/billing.js"></script>
     <script src="/app.js"></script>
   </body>

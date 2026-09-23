@@ -182,6 +182,9 @@
     }
     const dailyTokens = finite(input.dailyTokens);
     const percentPerDay = finite(input.percentPerDay);
+    if (input.demand && input.demand.ready !== true) {
+      return { ...base, status: "sampling", reason: "censored-demand-unavailable" };
+    }
     if (!(dailyTokens > 0)) return { ...base, status: "sampling", reason: "no-recent-usage" };
     if (input.calibration && input.calibration.ready !== true) {
       return { ...base, status: "sampling", reason: input.calibration.reason || "model-calibrating" };
@@ -265,6 +268,7 @@
       ...base, status: "ready", reason: null, end, resetAt, remainingPercent: remaining,
       percentPerDay, dailyTokens, tokensPerPercent, fitQuality, intervalCount: input.intervalCount,
       benefitUnit: "quota-percentage-points", equivalentDailyTokens, equivalentTokensPerPercent,
+      demand: input.demand || null,
       period, scenarios, plan: scenarios[1], policyUncertain: modes.length > 1,
       target,
       urgentPlans,

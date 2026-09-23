@@ -10,4 +10,4 @@ Set-Location $ProjectRoot
 Write-Host "Starting AI token dashboard..."
 Write-Host "URL: http://localhost:$Port"
 
-node .\server.js --port $Port
+node --use-system-ca .\server.js --port $Port

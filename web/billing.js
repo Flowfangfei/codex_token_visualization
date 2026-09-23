@@ -5,7 +5,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function createBilling() {
   "use strict";
 
-  const PRICE_AS_OF = "2026-09-10";
+  const PRICE_AS_OF = "2026-09-23";
   const CURRENCY = "USD";
   const TOKEN_SCALE = 1_000_000;
   const CNY_PER_USD = 1.5 / 0.22;
@@ -19,6 +19,8 @@
     "moonshotai",
     "kimi",
     "kimi-code",
+    "zhipu",
+    "zhipuai",
     "deepseek",
     "deepseek-official",
     "xai",
@@ -33,16 +35,23 @@
   ]);
 
   const RATES = Object.freeze([
+    rate({"id":"gpt-6-sol","vendor":"openai","label":"GPT-6 Sol","input":2,"cacheRead":0.2,"cacheWrite":2.5,"output":10,"longContext":{"threshold":272000,"input":4,"cacheRead":0.4,"cacheWrite":5,"output":15},"source":"https://developers.openai.com/api/docs/pricing","routes":["gpt-6-sol"],"aliases":["gpt-6-sol"]}),
+    rate({"id":"gpt-6-luna","vendor":"openai","label":"GPT-6 Luna","input":0.1,"cacheRead":0.01,"cacheWrite":0.125,"output":0.5,"longContext":{"threshold":272000,"input":0.2,"cacheRead":0.02,"cacheWrite":0.25,"output":0.75},"source":"https://developers.openai.com/api/docs/pricing","routes":["gpt-6-luna"],"aliases":["gpt-6-luna"]}),
+    rate({"id":"claude-opus-5.5","vendor":"anthropic","label":"Claude Opus 5.5","aliases":["claude-opus-5-5","opus-5.5","opus-5-5"],"input":4,"cacheRead":0.2,"cacheWrite":5,"output":20,"source":"https://platform.claude.com/docs/en/about-claude/pricing","routes":["claude-opus-5.5"]}),
+    rate({"id":"grok-4.7","vendor":"xai","label":"Grok 4.7","input":2,"cacheRead":0.5,"output":6,"longContext":{"threshold":200000,"input":4,"cacheRead":1,"output":12},"source":"https://docs.x.ai/developers/pricing","routes":["grok-4.7"],"aliases":["grok-4.7"]}),
+    rate({"id":"cursor-grok-4.7-fast","vendor":"cursor","label":"Grok 4.7 Fast · Cursor / Grok Build","routes":["grok-4.7-fast"],"aliases":["grok-4.7-fast","grok-4-7-fast"],"input":4,"cacheRead":1,"output":12,"longContext":{"threshold":200000,"input":6,"cacheRead":1.5,"output":18},"note":"Cursor / Grok Build 专用；无公共 xAI API Fast 路由。","source":"https://docs.x.ai/developers/pricing"}),
+    rate({"id":"glm-5.3","vendor":"zhipu","label":"GLM-5.3","currency":"CNY","routes":["glm-5.3"],"input":8,"cacheRead":2,"output":28,"source":"https://bigmodel.cn/pricing","aliases":["glm-5.3"]}),
+    rate({"id":"glm-5.3-flash","vendor":"zhipu","label":"GLM-5.3-Flash","currency":"CNY","routes":["glm-5.3-flash"],"input":0.8,"cacheRead":0.23,"output":2.8,"note":"官方 API 标准价，不含限时折扣。","source":"https://bigmodel.cn/pricing","aliases":["glm-5.3-flash"]}),
     rate({
       id: "volcengine/glm-5-3-flash-260828",
       vendor: "volcengine",
-      label: "GLM-5.3-Flash · 智谱直连参考价",
+      label: "GLM-5.3-Flash",
       currency: "CNY",
       routes: ["volcengine/glm-5-3-flash-260828"],
       input: 0.8,
       cacheRead: 0.23,
       output: 2.8,
-      note: "按智谱官方 API 直连标准价估算，单位为元/百万 Token；2026-09-21 核验，不含限时折扣。实际调用路由仍为火山方舟，此处不表示方舟实际扣款。",
+      note: "按智谱官方 API 直连标准价估算，单位为元/百万 Token；2026-09-23 核验，不含限时折扣。实际调用路由仍为火山方舟，此处不表示方舟实际扣款。",
       source: "https://bigmodel.cn/pricing",
     }),
     rate({
@@ -231,7 +240,7 @@
       id: "deepseek-flash",
       vendor: "deepseek",
       label: "DeepSeek V4.1 Flash",
-      routes: ["deepseek-flash"],
+      routes: ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"],
       aliases: ["deepseek-flash", "deepseek-v4.1-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "v4.1-flash", "v4-flash"],
       currency: "CNY",
       peakTimezone: "Asia/Shanghai",
@@ -256,8 +265,7 @@
       cacheWrite: null,
       output: 13.5,
       peak: { input: 9, cacheRead: 0.3, output: 27 },
-      redirect: { effectiveAt: "2026-09-14T04:00:00.000Z", targetId: "deepseek-flash" },
-      note: "北京时间 2026-09-14 12:00 起，请求转到 V4.1 Flash，并按 Flash 价格计费。",
+      note: "2026-09-23 官方价表仍列为 V4-Pro-0813，按 Pro 峰谷价估算。",
       source: "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
     }),
     rate({
@@ -433,12 +441,11 @@
       source: "https://www.kimi.com/code/docs/kimi-code/models.html",
     }),
     Object.freeze({
-      id: "deepseek-v4-pro-transition",
+      id: "deepseek-flash-legacy-routes",
       provider: "deepseek-harness",
-      route: "deepseek-v4-pro",
+      route: "deepseek-v4-flash / deepseek-v4-flash-vision-exp",
       destinations: Object.freeze(["deepseek-flash"]),
-      effectiveAt: "2026-09-14T04:00:00.000Z",
-      note: "北京时间 2026-09-14 12:00 起生效。",
+      note: "旧 Flash 路由由 V4.1 Flash 提供服务；Pro 保持独立路由和价格。",
       source: "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
     }),
   ]);
@@ -507,7 +514,7 @@
       const model = route.includes("/") ? route.slice(route.indexOf("/") + 1) : route;
       const scoped = RATES.find((entry) => entry.id === `${billingProvider}/${model}`);
       if (scoped) return scoped;
-      const vendor = { openai: "openai", anthropic: "anthropic", deepseek: "deepseek", "deepseek-official": "deepseek", xai: "xai", moonshot: "moonshot", moonshotai: "moonshot" }[billingProvider];
+      const vendor = { openai: "openai", anthropic: "anthropic", deepseek: "deepseek", "deepseek-official": "deepseek", xai: "xai", zhipu: "zhipu", "zhipuai": "zhipu", "zhipuai-coding-plan": "zhipu", moonshot: "moonshot", moonshotai: "moonshot" }[billingProvider];
       return vendor ? RATES.find((entry) => entry.vendor === vendor && entry.routes.includes(model)) || null : null;
     }
     if (route.startsWith("volcengine/")) {
@@ -812,6 +819,7 @@
   }
 
   const VENDOR_LABELS = Object.freeze({
+    zhipu: "智谱",
     volcengine: "火山方舟",
     openai: "OpenAI",
     anthropic: "Anthropic",
@@ -829,7 +837,8 @@
     cursor: Object.freeze(["cursor", "openai", "anthropic", "xai", "google", "meta"]),
     kimi: Object.freeze(["moonshot"]),
     "deepseek-harness": Object.freeze(["deepseek"]),
-    grok: Object.freeze(["xai"]),
+    grok: Object.freeze(["xai", "cursor"]),
+    "grok-build": Object.freeze(["xai", "cursor"]),
   });
 
   function vendorLabel(vendor) {

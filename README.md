@@ -10,7 +10,7 @@
 
 ### 总览
 
-所有已注册智能体的累计用量、按 2026-09-10 官方 API 单价估算的近 30 日费用、模型分布、每日 Token 热力图、趋势、重置额度与每日明细集中在一页。
+所有已注册智能体的累计用量、按 2026-09-23 API 单价估算的近 30 日费用、模型分布、每日 Token 热力图、趋势、重置额度与每日明细集中在一页。
 
 ![AI Token Ledger 总览](docs/assets/overview.png)
 
@@ -70,6 +70,16 @@ Grok Build 页面读取官方 CLI 会话中的 `turn_completed.usage`，自动�
 
 ![今天优先续工示例](docs/assets/reset-planner-urgent-demo.png)
 
+额度用尽后的零消耗不再自动解释为需求下降。下面是**模拟账户**的受限修正示例，实际日均与续工需求估计分别展示：
+
+![受限时长修正示例](docs/assets/demand-correction-demo.png)
+
+### 趋势时间范围与热力图
+
+总览及各数据源的趋势区支持“折线 / 热力图”切换，共用近 30 天、90 天、180 天、近一年、全部记录和自定义起止日期。选择会保存在当前浏览器；筛选只影响趋势图，不修改累计统计、导出文件或额度预测。
+
+热力图一格一天，颜色深浅对应所选范围内的每日 Token，具体阈值见图例。悬停、点击或键盘聚焦可查看单日日期、Token 和费用；较长日历可以横向滚动，默认展示最近一端。虚线表示无用量记录，与明确记录的零 Token 区分；折线也在缺失日期处断开，不虚构消耗。“全部”展示本地现有日账本，不补造未采集历史。
+
 ### 新版本提示
 
 程序确认 GitHub 远端分支领先本地版本后显示更新横幅。关闭横幅后，同一远端版本不再重复提示。
@@ -88,7 +98,7 @@ Grok Build 页面读取官方 CLI 会话中的 `turn_completed.usage`，自动�
 | --- | --- |
 | 多来源用量账本 | 分别展示 Codex、Claude Code、Cursor、Kimi Code、OpenCode、DeepSeek Harness、Grok 本地用量与 Grok Build；总览由后端注册表动态聚合。 |
 | 每日快照 | Codex / Claude Code / all-agent 使用 `ccusage`；Cursor 汇总 usage events；Kimi 汇总 `wire.jsonl`；OpenCode 汇总 SQLite；DeepSeek Harness 汇总 Zstandard 会话计量事件；Grok 汇总本地主会话，Grok Build 汇总完成 turn。 |
-| 日历热力图 | 总览按天展示最近最多 53 周的 Token 用量，颜色深浅反映各活跃日的相对用量。 |
+| 日历热力图 | 总览及各数据源支持上游热力图，可选预设范围或自定义日期。 |
 | 官方额度窗口 | 同步 Codex、Claude Code、Cursor、Kimi 与 Grok Build 的当前已用比例、剩余额度、账期或重置时间。 |
 | 统一刷新 | 顶部刷新和“全部导出”会刷新全部已注册本地 token 与账户额度源。 |
 | 重点来源 | 可自行选择出现在导航、总览和预测页的 Provider；隐藏不停止后台刷新。 |
@@ -387,6 +397,22 @@ banked reset 通过 Grok Web 自身的 `ConsumerUiSvc/GetRemainingResets` 只读
 
 等效 Token 是当前账户、当前额度窗口、本次拟合的相对刻度，不是某个固定模型的官方 Token。刷新重新拟合可能改变基准，不能跨 Provider、套餐或不同时期直接比较这个数；原始历史账本不会被重写，也不会与等效 Token 相加。
 
+### 用尽额度后的零消耗
+
+实际完成用量不等于想做的工作量。预测层现在区分正常休息、可识别的额度耗尽和恢复时刻不明确的空档，原始/等效 Token 使用同一套时间证据，不改写账本，也不增加“假想消耗”。
+
+- **留下证据**：成功同步时，进入或离开 `100%` 已用状态立即记录；仍为 `100%` 且距离上一条观测至少 15 分钟时，即使 Token 没变化也保留观测。这不是新增后台定时器，没有刷新就没有观测。仍写进原有合并 JSON，沿用压缩和保留策略，额外只记录用量采集时间；零增量不会增加有效模型拟合样本。
+- **排除受限时长**：相邻观测属于同一窗口和周期、均已用 `100%`、累计 Token 相同、间隔不超过 6 小时、两端的用量与额度采集时间差不超过 1 小时时，排除这段零消耗时间。最新零余额到当前用量快照之间只能作暂推，明确标注，并截断到自然恢复时刻和 6 小时观察边界。
+- **恢复空档不虚增速度**：若同日两次观测间发生重置，且可以核对该空档的 Token 增量，估速时同时排除空档时间和对应 Token，而不是只减分母。同日多次重置逐段处理。
+- **不确定就保留缺口**：跨日恢复无法分配 Token、观测间隔过长、旧记录缺少用量采集时间、计数回退等情况，该日不参与修正估速。未知不等于零。若同一周期的连续 `100%` 观测仍有真实 Token 增长，则不能认为该窗口阻断了所有工作，不按受限周期修正。
+- **正常休息仍计入**：没有受限证据的夜间、零用量日仍保留在分母中，不以“忙碌小时的速度 × 24”冒充全天需求。今天只计算到用量快照的已过时间；浏览器放着不刷新，不会让旧 Token 被越来越大的时间分母稀释。
+
+修正速率为 `24 × 可观测 Token / 可观测小时`，继续按今日、3 日、7 日加权。今日修正至少需 1 个可观测小时，3/7 日部分至少需 6 小时，避免将几分钟样本无限外推。近期因受限完全无法估计时，可参考最近 28 日内至少 3 个未受限完整日；仍无足够证据就暂停定量规划，保留“确有工作且额度已空时考虑最早到期 reset”的条件建议。
+
+页面同时展示**实际记录日均**与**受限修正后的需求日均**，以及排除时长、恢复空档和不确定天数。修正值假定可观测时段的平均节奏仍适用，**不是无偏的真实需求估计，也不证明用户一直有待办**。当前只用所选的通用周/月额度窗口做这项修正，不把单模型窗口耗尽等同于整个 Provider 停工；其他产品、短时限流和未记录的历史限制仍可能影响实际结果。
+
+压力检验只取不含受限/未知日的**原日历连续 3 日块**。剔除日保留为空缺，不能填零，也不能把前后两天拼接成相邻日；样本不足则不输出压力收益。这是对未受限历史的条件检验，不代表完整未来需求分布。
+
 ### 如果额度在一天内被重置
 
 每次有效刷新都会为当前 Provider 的所有可选额度窗口分别写入紧凑观测点，记录窗口名、已用比例、重置时间、对应累计 Token 和分模型汇总。默认只把周级及以上窗口纳入预测；月、周及模型专属窗口各自维护观测和重置分段。下列任一情况会自动切换到新分段：
@@ -399,7 +425,7 @@ banked reset 通过 Grok Web 自身的 `ConsumerUiSvc/GetRemainingResets` 只读
 
 开启新分段后，重置前形成的有效区间继续用于估计消耗率；新周期的已用比例、剩余比例和截止时间描述当前状态。新周期暂时只有一个观测点时，只要历史有效区间和近期模型校准检查通过，面板仍可给出预测。
 
-同一天可以记录多次重置。每日观测文件最多保存 96 条记录；达到上限后，程序优先保留各额度窗口的首尾点、分段边界和重置点，再用较新的普通观测补足剩余位置，以保留月度和周度窗口的观测依据。
+同一天可以连续创建多个重置分段，并不只支持一次重置。每日观测仍限制为 96 条；超过限制时会优先保留每个额度窗口的首尾点、每个分段的边界、重置点和进入/离开零余额的相邻点，再用较新的普通观测填满剩余位置，避免高频刷新挤掉关键证据。
 
 重置识别依赖同步时记录的账户状态。若两次重置完整发生在相邻两次同步之间，且最终已用比例、累计 Token 与 `resetsAt` 没有留下变化，现有快照缺少识别中间边界所需的信息。手动使用 reset credit 后可点击右上角刷新，为新周期记录观测点。
 
@@ -503,13 +529,13 @@ resetPlanning: {
 注册脚本默认创建每天 12:00 运行的计划任务。运行时间可通过 `-At` 参数修改。
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 -At 12:00 -Timezone Asia/Tokyo
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 -At 12:00 -Timezone Asia/Shanghai
 ```
 
 如果已有任务需要覆盖：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 -At 12:00 -Timezone Asia/Tokyo -Force
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 -At 12:00 -Timezone Asia/Shanghai -Force
 ```
 
 旧版用户若机器上已有 `CodexUsageDailyExport`，可以原地替换为全量同步任务：
@@ -518,7 +544,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-tas
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-daily-task.ps1 `
   -TaskName CodexUsageDailyExport `
   -At 12:00 `
-  -Timezone Asia/Tokyo `
+  -Timezone Asia/Shanghai `
   -Force
 ```
 
@@ -569,7 +595,7 @@ npm run export:grok-build
 npm start
 ```
 
-默认 `ccusage` 导出时区是 `Asia/Tokyo`。如果希望改为上海时区：
+日账本和界面按北京时间（`Asia/Shanghai`）分日。手动导出也使用相同时区：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\export-all-daily.ps1 -Timezone Asia/Shanghai
@@ -648,7 +674,13 @@ npx -y ccusage@latest claude daily --json
 
 ### 账户额度同步失败时
 
-常见原因包括网络不可用、CLI 未登录、OAuth refresh token 被撤销或账户接口结构调整。面板会保留最近一次成功快照。Claude 显示“需重新登录”时可运行 `claude auth login --claudeai`；普通 access token 过期时由后端自动续期。Kimi CLI 可使用 `kimi login` 重新登录。在线额度查询失败不影响本地每日 token 导出。
+页面“全部刷新”会同时检查用量、账户额度和重置库存。任一来源失败或只完成部分同步，都会显示具体来源与原因，不再以“用量已导出”代表全部成功。重置库存读取失败显示 `--`，成功读取且没有可用次数才显示 `0`；刚刷新的脱敏库存结果会在内存中短暂复用 30 秒，避免导出和页面渲染重复请求产生不一致。手动全部刷新会跳过已有缓存重新读取，失败结果不会冒充旧的成功库存。
+
+若多个平台同时报 `fetch failed`，先看状态栏中的底层错误码。`SELF_SIGNED_CERT_IN_CHAIN` 表示 TLS 证书链不受 Node 信任，不等同于账户过期。仪表盘、定时同步和手动导出会启用系统证书库，同时保留 Node 默认和显式配置的 CA；不会关闭 TLS 校验、自动安装证书或修改系统代理。旧后台需重开一次“打开仪表盘.bat”。如果系统本身也不信任该证书，应核实网络/安全软件配置，不要通过 `NODE_TLS_REJECT_UNAUTHORIZED=0` 绕过校验。
+
+若 Codex 报 `spawn codex ENOENT`，表示后台找不到 CLI，并不表示登录凭证失效。Windows 后端依次检查有效的 `CODEX_CLI_PATH`、npm 启动脚本、PATH 中的原生 CLI，以及 `%LOCALAPPDATA%\OpenAI\Codex\bin` 下最近更新的桌面 CLI。即使旧后台没有继承桌面应用更新后的 PATH，也可以自动找到 CLI；特殊安装位置可用 `CODEX_CLI_PATH` 指定，并重启仪表盘服务使环境变量生效。部分导出失败时，状态栏会同时显示来源和具体错误，其他成功来源仍照常更新。
+
+常见原因是网络不可用、CLI 未登录、OAuth refresh token 已被撤销，或账户接口结构调整。面板会保留最近成功快照；重新登录相应客户端后点击顶部刷新即可重试。Claude 显示“需重新登录”时运行 `claude auth login --claudeai`；普通 access token 过期会由后端自动续期，无需重复登录。Kimi 可运行 `kimi login` 重新建立登录态；即使在线额度失败，本地每日 token 仍会正常导出。
 
 ### Kimi 当日 token 未显示时
 
@@ -778,4 +810,4 @@ node --check web/forecast-model.js
 node --check web/billing.js
 ```
 
-测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤、Kimi CLI/桌面事件合并去重、OpenCode 多模型聚合、DeepSeek Harness 多 frame 解码与逐步骤去重、Grok 主会话筛选与分叉去重、Grok Build 缓存输入拆分与跨会话去重、显示设置的过滤与最少一个来源约束，以及按 2026-09-10 官方 API 单价和已公布路由规则估算费用。
+测试覆盖模型等效 Token、模型混合不可辨识时的降级、同日多窗口观测、额度重置分段、Provider 元数据脱敏、Claude 动态窗口与模型过滤、Kimi CLI/桌面事件合并去重、OpenCode 多模型聚合、DeepSeek Harness 多 frame 解码与逐步骤去重、Grok 主会话筛选与分叉去重、Grok Build 缓存输入拆分与跨会话去重、显示设置的过滤与最少一个来源约束，以及按 2026-09-23 API 单价和已公布路由规则估算费用。

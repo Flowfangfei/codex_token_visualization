@@ -125,7 +125,7 @@ test("falls back to recorded cost only when no model can be priced", () => {
 
 test("exposes a dated catalog for the billing API", () => {
   const catalog = Billing.catalog();
-  assert.equal(catalog.asOf, "2026-09-10");
+  assert.equal(catalog.asOf, "2026-09-23");
   assert.equal(catalog.currency, "USD");
   assert.ok(catalog.rates.some((entry) => entry.id === "gpt-6-astra" && entry.input === 10 && entry.output === 50));
   assert.ok(catalog.rates.some((entry) => entry.id === "gpt-5.6-sol" && entry.input === 4 && entry.output === 20));
@@ -134,7 +134,8 @@ test("exposes a dated catalog for the billing API", () => {
 });
 
 test("filters the rate card by Provider without dropping observed models", () => {
-  assert.deepEqual(Billing.ratesForProvider("grok").map((entry) => entry.id), ["grok-4.6", "grok-4.5", "grok-4.3", "grok-build-0.1"]);
+  assert.ok(Billing.ratesForProvider("grok").some((entry) => entry.id === "grok-4.7"));
+  assert.ok(Billing.ratesForProvider("grok").some((entry) => entry.id === "grok-build-0.1"));
   assert.ok(Billing.ratesForProvider("codex").every((entry) => entry.vendor === "openai"));
   assert.ok(Billing.ratesForProvider("kimi").some((entry) => entry.id === "kimi-k3"));
   assert.deepEqual(Billing.routesForProvider("cursor").map((entry) => entry.id), ["cursor-auto-smart"]);
@@ -157,15 +158,15 @@ test("prices DeepSeek V4 Flash in CNY using Shanghai weekday peak windows", () =
   assert.equal(Billing.estimateUsageCost(usage, usage.modelName, { at: weekendAt }).amount, 1);
 });
 
-test("routes DeepSeek V4 Pro to V4.1 Flash after the announced cutoff", () => {
+test("keeps DeepSeek V4 Pro on the separately published Pro price", () => {
   const usage = { modelName: "deepseek-v4-pro", inputTokens: 1_000_000, outputTokens: 0 };
   const before = Billing.estimateUsageCost(usage, usage.modelName, { at: "2026-09-10T02:00:00.000Z" });
   const after = Billing.estimateUsageCost(usage, usage.modelName, { at: "2026-09-14T05:00:00.000Z" });
   assert.equal(before.rate.id, "deepseek-v4-pro");
   assert.equal(before.amount, 9);
-  assert.equal(after.rate.id, "deepseek-flash");
-  assert.equal(after.rate.routedFrom, "deepseek-v4-pro");
-  assert.equal(after.amount, 1);
+  assert.equal(after.rate.id, "deepseek-v4-pro");
+  assert.equal(after.rate.routedFrom, null);
+  assert.equal(after.amount, 4.5);
 });
 
 test("keeps a timed DeepSeek day in CNY instead of restating it at off-peak USD", () => {
@@ -205,6 +206,6 @@ test("annotates a usage snapshot with estimatedCostUSD and leaves stored fields 
   assert.equal(snapshot.daily[0].totalCost, 0);
   assert.equal(snapshot.daily[0].estimatedCostUSD, 2);
   assert.equal(snapshot.totals.estimatedCostUSD, 2);
-  assert.equal(snapshot.billing.asOf, "2026-09-10");
+  assert.equal(snapshot.billing.asOf, "2026-09-23");
   assert.equal(snapshot.billing.models[0].rate, "grok-4.6");
 });

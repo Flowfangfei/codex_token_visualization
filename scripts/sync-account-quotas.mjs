@@ -1,14 +1,16 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync, statSync } from "node:fs";
 import { arch, homedir, hostname, release, type } from "node:os";
-import { delimiter, dirname, join, resolve, win32 as pathWin32 } from "node:path";
+import { dirname, join, resolve, win32 as pathWin32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
 import providerRegistry from "../providers/registry.js";
 import { writeConsolidatedUsageSnapshot } from "./usage-storage.mjs";
+import network from "../lib/network.js";
+network.useSystemCertificates();
 
 const require = createRequire(import.meta.url);
 const Billing = require("../web/billing.js");
@@ -1255,24 +1257,52 @@ function toIso(value) {
 }
 
 function safeError(error) {
-  return String(error?.message || error || "Unknown error")
+  return network.networkErrorMessage(error)
     .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]")
     .replace(/WorkosCursorSessionToken=[^;\s]+/gi, "WorkosCursorSessionToken=[redacted]")
     .replace(/(["']?(?:(?:access|refresh|id)[_-]?token|cookie)["']?\s*[=:]\s*)["']?[^"',;\s}]+/gi, "$1[redacted]")
     .slice(0, 220);
 }
 
-export function resolveCodexCliPath({ platform = process.platform, env = process.env, pathExists = existsSync } = {}) {
+export function resolveCodexCliPath({ platform = process.platform, env = process.env, pathExists = existsSync,
+  readDirectory = readdirSync, fileStat = statSync } = {}) {
   const configuredPath = String(env.CODEX_CLI_PATH || "").trim();
   if (configuredPath && pathExists(configuredPath)) return configuredPath;
   if (platform !== "win32") return "codex";
 
   const candidates = [];
   if (env.APPDATA) candidates.push(pathWin32.join(env.APPDATA, "npm", "codex.cmd"));
-  for (const directory of String(env.PATH || "").split(platform === "win32" ? ";" : delimiter).filter(Boolean)) {
-    candidates.push(pathWin32.join(directory.replace(/^"|"$/g, ""), "codex.cmd"));
+  const pathDirectories = String(env.PATH || env.Path || "").split(";").filter(Boolean)
+    .map((directory) => directory.replace(/^"|"$/g, ""));
+  for (const directory of pathDirectories) {
+    candidates.push(pathWin32.join(directory, "codex.cmd"));
   }
-  return candidates.find((candidate) => pathExists(candidate)) || "codex";
+  const shim = candidates.find((candidate) => pathExists(candidate));
+  if (shim) return shim;
+  const executable = pathDirectories.filter((directory) => !/\\WindowsApps(?:\\|$)/i.test(directory))
+    .map((directory) => pathWin32.join(directory, "codex.exe")).find((candidate) => pathExists(candidate));
+  if (executable) return executable;
+
+  // Long-running dashboard processes may retain PATH from before a desktop update.
+  if (env.LOCALAPPDATA) {
+    const bin = pathWin32.join(env.LOCALAPPDATA, "OpenAI", "Codex", "bin");
+    try {
+      const installed = readDirectory(bin, { withFileTypes: true }).filter((entry) => entry.isDirectory())
+        .map((entry) => pathWin32.join(bin, entry.name, "codex.exe"))
+        .filter((candidate) => pathExists(candidate))
+        .flatMap((candidate) => {
+          try {
+            const info = fileStat(candidate);
+            return info.isFile() ? [{ path: candidate, modified: info.mtimeMs }] : [];
+          } catch (_) { return []; }
+        })
+        .sort((a, b) => b.modified - a.modified || a.path.localeCompare(b.path));
+      if (installed.length) return installed[0].path;
+    } catch (_) {
+      // An absent desktop install does not prevent standalone CLI discovery.
+    }
+  }
+  return "codex";
 }
 
 export function codexAppServerInvocation(options = {}) {
@@ -2451,11 +2481,11 @@ function aggregateUsage(snapshot) {
 }
 
 function currentUsageAggregate(source, inMemoryUsage) {
-  if (inMemoryUsage) return aggregateUsage(inMemoryUsage);
+  if (inMemoryUsage) return { ...aggregateUsage(inMemoryUsage), usageFetchedAt: new Date().toISOString() };
   const filePath = usageSnapshotPath(source);
   if (!filePath || !existsSync(filePath)) return null;
   try {
-    return aggregateUsage(readJson(filePath));
+    return { ...aggregateUsage(readJson(filePath)), usageFetchedAt: statSync(filePath).mtime.toISOString() };
   } catch (_) {
     return null;
   }
@@ -2590,7 +2620,8 @@ export function compactObservations(observations, maxEntries = 96) {
       ? null
       : String(current.segment);
     const segmentChanged = previousSegment !== null && currentSegment !== null && previousSegment !== currentSegment;
-    if (previous && (current?.resetDetected || segmentChanged)) {
+    const exhaustedChanged = previous && (Number(previous.usedPercent) === 100) !== (Number(current.usedPercent) === 100);
+    if (previous && (current?.resetDetected || segmentChanged || exhaustedChanged)) {
       protectedIndexes.add(previousIndex);
       protectedIndexes.add(index);
     }
@@ -2608,6 +2639,16 @@ export function compactObservations(observations, maxEntries = 96) {
   return selected
     .sort((a, b) => a - b)
     .map((index) => entries[index]);
+}
+
+export function shouldRecordQuotaObservation(prior, current, fetchedAt) {
+  if (!prior) return true;
+  const elapsedMinutes = (new Date(fetchedAt).getTime() - new Date(prior.fetchedAt).getTime()) / 60000;
+  const quotaMoved = Math.abs(Number(current.usedPercent) - Number(prior.usedPercent)) >= 0.1;
+  const exhaustedChanged = (Number(current.usedPercent) === 100) !== (Number(prior.usedPercent) === 100);
+  const usageMoved = current.totalTokens === null || prior.totalTokens === null
+    || Math.abs(current.totalTokens - Number(prior.totalTokens)) >= 50_000;
+  return quotaMoved || exhaustedChanged || (elapsedMinutes >= 15 && (usageMoved || Number(current.usedPercent) === 100));
 }
 
 function writeQuotaObservation(snapshot, usageAggregate) {
@@ -2640,10 +2681,7 @@ function writeQuotaObservation(snapshot, usageAggregate) {
     });
     const newSegment = segmentDecision.newSegment;
     const segment = newSegment ? Number(prior?.segment || 0) + 1 : Number(prior.segment || 1);
-    const elapsedMinutes = prior ? (new Date(fetchedAt).getTime() - new Date(prior.fetchedAt).getTime()) / 60000 : Infinity;
-    const quotaMoved = !prior || Math.abs(usedPercent - Number(prior.usedPercent)) >= 0.1;
-    const usageMoved = !prior || totalTokens === null || prior.totalTokens === null || Math.abs(totalTokens - Number(prior.totalTokens)) >= 50_000;
-    if (!newSegment && !quotaMoved && !(elapsedMinutes >= 15 && usageMoved)) continue;
+    if (!newSegment && !shouldRecordQuotaObservation(prior, { usedPercent, totalTokens }, fetchedAt)) continue;
 
     additions.push({
       fetchedAt,
@@ -2656,6 +2694,7 @@ function writeQuotaObservation(snapshot, usageAggregate) {
       resetAt: window.resetsAt || null,
       windowDurationMins: Number(window.windowDurationMins) || null,
       totalTokens,
+      usageFetchedAt: usageAggregate?.usageFetchedAt || null,
       models: windowUsage.models,
       resetDetected: segmentDecision.resetDetected,
       resetReason: segmentDecision.reason,

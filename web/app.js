@@ -5,10 +5,6 @@ const els = {
   statusDot: document.querySelector("#statusDot"),
   sourcePath: document.querySelector("#sourcePath"),
   sourceCompare: document.querySelector("#sourceCompare"),
-  calendarHeatmapPanel: document.querySelector("#calendarHeatmapPanel"),
-  calendarHeatmap: document.querySelector("#calendarHeatmap"),
-  heatmapRangePill: document.querySelector("#heatmapRangePill"),
-  heatmapSummary: document.querySelector("#heatmapSummary"),
   detailGrid: document.querySelector("#detailGrid"),
   lowerGrid: document.querySelector("#lowerGrid"),
   tablePanel: document.querySelector("#tablePanel"),
@@ -322,6 +318,7 @@ function dayCost(day) {
 }
 
 function chartCost(day) {
+  if (Object.hasOwn(day, "recorded")) return Number(day.costUSD) || 0;
   const estimated = Billing.estimateDayCost(day);
   return currentView === "overview" ? estimated.usd : estimated.amount;
 }
@@ -489,48 +486,14 @@ function localUsageDays(snapshot) {
   });
 }
 
-function resetStressHistory(days) {
-  const first = days.map(dayKey).filter(Boolean).sort()[0];
-  if (!first) return [];
-  return Array.from({ length: 28 }, (_, index) => addDays(localDateKey(), index - 28))
-    .filter((date) => date >= first).map((date) => usageForDateRange(days, date, date));
-}
-
-function buildForecastRate(days, fallbackDailyTokens) {
-  const today = localDateKey();
-  const todayUsage = usageForDateRange(days, today, today);
-  const now = new Date();
-  const elapsedHours = Math.max(1, ((now.getTime() + 8 * 3600000) % 86400000) / 3600000);
-  const todayRate = todayUsage > 0 ? (todayUsage / elapsedHours) * 24 : null;
-  const threeDayStart = addDays(today, -2);
-  const sevenDayStart = addDays(today, -6);
-  const threeDayUsage = usageForDateRange(days, threeDayStart, today);
-  const sevenDayUsage = usageForDateRange(days, sevenDayStart, today);
-  const threeDayRate = threeDayUsage > 0 ? threeDayUsage / 3 : null;
-  const sevenDayRate = sevenDayUsage > 0 ? sevenDayUsage / 7 : null;
-
-  const weightedParts = [];
-  if (todayRate) weightedParts.push({ value: todayRate, weight: 0.55 });
-  if (threeDayRate) weightedParts.push({ value: threeDayRate, weight: todayRate ? 0.3 : 0.65 });
-  if (sevenDayRate) weightedParts.push({ value: sevenDayRate, weight: todayRate ? 0.15 : 0.35 });
-
-  const weightTotal = weightedParts.reduce((sum, part) => sum + part.weight, 0);
-  const weightedRate = weightTotal
-    ? weightedParts.reduce((sum, part) => sum + part.value * part.weight, 0) / weightTotal
-    : inputNumberOrNull(fallbackDailyTokens);
-
-  return {
-    today,
-    todayUsage,
-    elapsedHours,
-    todayRate,
-    threeDayUsage,
-    threeDayRate,
-    sevenDayUsage,
-    sevenDayRate,
-    weightedRate,
-    isFallback: !weightTotal && inputNumberOrNull(fallbackDailyTokens) !== null,
-  };
+function buildForecastRate(days, fallbackDailyTokens, context = {}, modelFit = null) {
+  const observations = (context.observations || []).map((point) => ({ ...point,
+    demandTokens: modelFit?.active ? globalThis.ForecastModel.equivalentTokensForDay({
+      totalTokens: point.totalTokens,
+      modelBreakdowns: Object.entries(point.models || {}).map(([modelName, totalTokens]) => ({ modelName, totalTokens })),
+    }, modelFit) : point.totalTokens,
+  }));
+  return globalThis.ForecastDemand.estimate({ ...context, days, observations, fallbackDailyTokens });
 }
 
 function quotaSnapshotDay(snapshot) {
@@ -781,11 +744,20 @@ function buildForecast(agent, requestedWindowName = forecastWindowSelections[age
   const selectedWindow = selectedQuotaWindow(quotaData?.latest, requestedWindowName);
   const selectedWindowName = selectedWindow?.name || null;
   const account = accountQuotaSummary(quotaData?.latest, selectedWindowName);
-  const rawRate = buildForecastRate(days, plan.fallbackDailyTokens);
+  const usageFetchedAt = snapshot.latestFile?.modifiedAt;
+  const totalTokens = days.reduce((sum, day) => sum + (Number(day.totalTokens) || 0), 0);
+  // A model-specific exhausted pool cannot establish that all provider work stopped.
+  const demandContext = { observations: selectedWindow?.modelPatterns?.length ? [] : quotaData?.observations || [],
+    windowName: selectedWindowName, usageFetchedAt, currentUsage: { fetchedAt: usageFetchedAt, totalTokens } };
+  const rawRate = buildForecastRate(days, plan.fallbackDailyTokens, demandContext);
   const rawQuotaFit = fitQuotaBurn(days, quotaData, account, rawRate.weightedRate, null, selectedWindowName);
   const hasQuotaObservations = quotaObservationSegments(quotaData, selectedWindowName).length > 0;
   const historyIntervals = quotaHistoryIntervals(quotaData, selectedWindowName);
-  const recentDays = days.filter((day) => dayKey(day) >= addDays(today, -6) && dayKey(day) <= today);
+  let recentDays = days.filter((day) => dayKey(day) >= addDays(today, -6) && dayKey(day) <= today);
+  if (rawRate.demand.referenceDays && !recentDays.some((day) => day.totalTokens > 0)) {
+    const lastUsageDay = days.filter((day) => day.totalTokens > 0).at(-1);
+    recentDays = lastUsageDay ? days.filter((day) => dayKey(day) >= addDays(dayKey(lastUsageDay), -6)) : recentDays;
+  }
   const priorityModels = globalThis.ForecastModel?.recentModelNames(recentDays) || [];
   const modelFit = hasQuotaObservations
     ? globalThis.ForecastModel?.fitModelWeightsFromIntervals(historyIntervals, rawQuotaFit?.model?.slope,
@@ -814,18 +786,18 @@ function buildForecast(agent, requestedWindowName = forecastWindowSelections[age
     weights: [],
   };
   const effectiveDays = resolvedModelFit.active ? globalThis.ForecastModel.applyModelWeights(days, resolvedModelFit) : days;
-  const rate = resolvedModelFit.active ? buildForecastRate(effectiveDays, plan.fallbackDailyTokens) : rawRate;
+  const rate = resolvedModelFit.active ? buildForecastRate(effectiveDays, plan.fallbackDailyTokens, demandContext, resolvedModelFit) : rawRate;
   const fittedQuota = resolvedModelFit.active
     ? fitQuotaBurn(effectiveDays, quotaData, account, rate.weightedRate, resolvedModelFit, selectedWindowName)
     : rawQuotaFit;
-  const quotaFit = calibration.ready ? fittedQuota : { ...fittedQuota, model: null, percentPerDay: null, runwayDays: null };
+  const quotaFit = calibration.ready && rate.demand.ready ? fittedQuota : { ...fittedQuota, model: null, percentPerDay: null, runwayDays: null };
   const budgetTokens = inputNumberOrNull(plan.budgetTokens);
   const remainingTokens = budgetTokens === null || usedTokens === null ? null : Math.max(budgetTokens - usedTokens, 0);
   const daysUntilEnd = periodEnd ? Math.max(0, (dayDistance(today, periodEnd) ?? -1) + 1) : null;
   const targetDailyTokens = remainingTokens !== null && daysUntilEnd && daysUntilEnd > 0 ? remainingTokens / daysUntilEnd : null;
   const manualExhaustionDays = remainingTokens !== null && rate.weightedRate > 0 ? remainingTokens / rate.weightedRate : null;
   const exhaustionDays = quotaFit?.model && Number.isFinite(quotaFit.runwayDays) ? quotaFit.runwayDays
-    : account?.type === "percent" && !calibration.ready ? null : manualExhaustionDays;
+    : account?.type === "percent" && (!calibration.ready || !rate.demand.ready) ? null : manualExhaustionDays;
   const predictedEnd = exhaustionDays === null ? null : addDays(today, Math.ceil(exhaustionDays));
   const projectedTokens = budgetTokens !== null && usedTokens !== null && daysUntilEnd !== null
     ? usedTokens + (rate.weightedRate || 0) * daysUntilEnd
@@ -1005,7 +977,11 @@ function renderAccountRunway(forecast) {
     const historyText = fit.historicalMode
       ? `跨 ${fit.contributingSegmentCount} 个重置周期的 ${fit.intervalCount} 个有效区间（当前周期 ${fit.currentSegmentPoints} 个观测点）`
       : `同一额度窗口内 ${fit.sampleCount} 个观测点`;
-    els.forecastAdvice.innerHTML = `<strong>跨周期拟合已启用。</strong><span>基于${historyText}，将${tokenBasis} 增量拟合为官方额度百分比；旧周期按 28 天半衰期降低权重。额度重置只开启新分段，不会清空历史样本。${escapeHtml(modelFitStatus(forecast.modelFit))}；预计 ${escapeHtml(formatRunway(forecast.exhaustionDays))} 后耗尽。</span>`;
+    const runwayText = forecast.exhaustionDays === 0 ? "当前额度已耗尽"
+      : `预计 ${formatRunway(forecast.exhaustionDays)} 后耗尽`;
+    els.forecastAdvice.innerHTML = `<strong>跨周期拟合已启用。</strong><span>基于${historyText}，将${tokenBasis} 增量拟合为官方额度百分比；旧周期按 28 天半衰期降低权重。额度重置只开启新分段，不会清空历史样本。${escapeHtml(modelFitStatus(forecast.modelFit))}；${escapeHtml(runwayText)}。</span>`;
+  } else if (account.type === "percent" && !forecast.rate.demand.ready) {
+    els.forecastAdvice.innerHTML = "<strong>受限期间需求尚不明确。</strong><span>可观测时段不足，暂缓耗尽时间与重置收益预测。官方余额仍正常展示；有工作待完成且额度已用尽时，可考虑最早到期的 reset。</span>";
   } else if (account.type === "percent" && !forecast.calibration?.ready) {
     const pending = (forecast.calibration?.unsupportedModels || []).join("、");
     els.forecastAdvice.innerHTML = `<strong>模型额度校准中。</strong><span>${escapeHtml(modelFitStatus(forecast.modelFit))}。${pending ? `待校准：${escapeHtml(pending)}。` : ""}主要模型至少需要 3 个有效扣减区间，并通过模型权重或稳定组合检查；反复刷新但没有新增消耗不会增加有效样本。官方余额和重置时间仍正常展示。</span>`;
@@ -1016,6 +992,12 @@ function renderAccountRunway(forecast) {
     els.forecastAdvice.innerHTML = `<strong>官方额度已同步。</strong><span>已收集 ${intervalCount} / ${requiredIntervals} 个跨周期有效区间，当前周期 ${currentPoints} 个观测点；达到 ${requiredIntervals} 个有效区间后启用原始 Token 拟合。额度重置只开启新分段，历史样本会继续参与并随时间衰减。${escapeHtml(modelFitStatus(forecast.modelFit))}。</span>`;
   } else {
     els.forecastAdvice.innerHTML = `<strong>账户账期已同步。</strong><span>账户计划单位与 token 不是已确认的一对一口径；保留原始已用、剩余和账期，待每日事件数据积累后再启用拟合。</span>`;
+  }
+  if (forecast.rate.demand.adjusted) {
+    const note = document.createElement("span");
+    note.textContent = demandStatus(forecast.rate.demand)
+      + "。按可观测时段的平均节奏估计续工需求；恢复空档的时间与对应用量同时排除，账本不变。这不是全天开工或仍有待办的证明。";
+    els.forecastAdvice.appendChild(note);
   }
 }
 
@@ -1034,6 +1016,12 @@ function renderForecastRunway(forecast) {
   els.forecastAdvice.appendChild(advice);
 }
 
+function demandStatus(demand) {
+  if (!demand?.adjusted) return "未识别到可排除的受限时段";
+  return `近 7 日排除 ${demand.removedHours.toFixed(1)} 小时，其中恢复空档 ${demand.recoveryHours.toFixed(1)} 小时、最近状态暂推 ${demand.provisionalHours.toFixed(1)} 小时；${demand.unknownDays} 日证据不足未参与估速`
+    + (demand.referenceDays ? `；沿用最近 28 日内 ${demand.referenceDays} 个未受限完整日` : "");
+}
+
 function renderForecastRates(forecast) {
   els.forecastRateList.replaceChildren();
   const rate = forecast.rate;
@@ -1043,20 +1031,20 @@ function renderForecastRates(forecast) {
     {
       label: "今天截至当前",
       value: rate.todayRate,
-      caption: rate.todayRate ? `${formatCompact(rate.todayUsage)} ${tokenUnit} / ${rate.elapsedHours.toFixed(1)} 小时` : "今天暂无本地用量",
+      caption: `${formatCompact(rate.todayUsage)} ${tokenUnit} 已记录 · ${rate.demand.availableHours[0].toFixed(1)} 可观测小时`,
     },
     {
       label: "近 3 日日均",
       value: rate.threeDayRate,
-      caption: rate.threeDayRate ? `近 3 个自然日 ${formatCompact(rate.threeDayUsage)} ${tokenUnit}` : "近 3 日暂无本地用量",
+      caption: `已记录 ${formatCompact(rate.threeDayUsage)} ${tokenUnit} · ${rate.demand.availableHours[1].toFixed(1)} 可观测小时`,
     },
     {
       label: "近 7 日日均",
       value: rate.sevenDayRate,
-      caption: rate.sevenDayRate ? `近 7 个自然日 ${formatCompact(rate.sevenDayUsage)} ${tokenUnit}` : "近 7 日暂无本地用量",
+      caption: `已记录 ${formatCompact(rate.sevenDayUsage)} ${tokenUnit} · ${rate.demand.availableHours[2].toFixed(1)} 可观测小时`,
     },
     {
-      label: adjusted ? "模型等效日均" : "综合预测日均",
+      label: rate.demand.adjusted ? "受限修正后的需求日均" : adjusted ? "模型等效日均" : "综合预测日均",
       value: rate.weightedRate,
       caption: rate.isFallback
         ? "使用手动日均兜底"
@@ -1066,6 +1054,8 @@ function renderForecastRates(forecast) {
       weighted: true,
     },
   ];
+  if (rate.demand.adjusted) rows.push({ label: "实际记录日均（未修正）", value: rate.observedWeightedRate,
+    caption: `${tokenUnit} · ${demandStatus(rate.demand)}` });
 
   rows.forEach((item) => {
     const row = document.createElement("div");
@@ -1095,7 +1085,7 @@ function renderForecast(agent = forecastAgent) {
     renderForecastMetric(
       forecast.modelFit?.active ? "模型等效日均" : "综合日均",
       forecast.rate.weightedRate ? `${formatCompact(forecast.rate.weightedRate)} / 日` : "--",
-      forecast.modelFit?.active ? "账户额度反向学习模型权重" : forecast.rate.isFallback ? "手动日均" : "今日、3 日、7 日加权"
+      forecast.rate.demand.adjusted ? "受限时长修正 · 非全天工作假设" : forecast.modelFit?.active ? "账户额度反向学习模型权重" : forecast.rate.isFallback ? "手动日均" : "今日、3 日、7 日加权"
     );
     renderForecastMetric(
       fit?.model ? "拟合耗尽" : "历史有效区间",
@@ -1222,7 +1212,7 @@ function renderResetCredits(data = latestResetCredits) {
     return;
   }
 
-  els.resetCredits.classList.remove("is-warning");
+  els.resetCredits.classList.toggle("is-warning", Boolean(data.partial));
   const credits = Array.isArray(data.credits) ? data.credits : [];
   const availableCredits = credits.filter((credit) => credit.status === "available");
   const nextExpiry = availableCredits
@@ -1352,16 +1342,136 @@ function renderMetrics(days, totals, view, bundle = {}) {
   renderMetric("费用估算", formatCost(totalCost, currency), billingCaption(days));
 }
 
-function renderTrend(days, label) {
-  els.trendChart.replaceChildren();
+const trendRange = document.querySelector("#trendRange");
+const trendStart = document.querySelector("#trendStart");
+const trendEnd = document.querySelector("#trendEnd");
+let trendSettings = { mode: "line", range: "30", start: "", end: "" };
+try {
+  const saved = JSON.parse(localStorage.getItem("ledger-trend") || "null");
+  if (saved && ["line", "heatmap"].includes(saved.mode)
+    && ["30", "90", "180", "365", "all", "custom"].includes(saved.range)) trendSettings = saved;
+} catch (_) { /* Storage can be disabled by browser policy. */ }
+let trendSource = { days: [], label: "" };
+trendRange.value = trendSettings.range;
+trendStart.value = trendSettings.start || addDays(localDateKey(), -29);
+trendEnd.value = trendSettings.end || localDateKey();
 
-  if (!days.length) {
-    els.rangePill.textContent = "--";
+function updateTrend() {
+  trendSettings = { ...trendSettings, range: trendRange.value, start: trendStart.value, end: trendEnd.value };
+  try { localStorage.setItem("ledger-trend", JSON.stringify(trendSettings)); } catch (_) { /* Optional preference. */ }
+  renderTrend(trendSource.days, trendSource.label);
+}
+document.querySelectorAll("[data-trend-mode]").forEach((button) => button.addEventListener("click", () => {
+  trendSettings.mode = button.dataset.trendMode;
+  updateTrend();
+}));
+[trendRange, trendStart, trendEnd].forEach((control) => control.addEventListener("change", updateTrend));
+
+function renderHeatmap(selection, label) {
+  const wrap = document.createElement("div");
+  wrap.className = "heatmap-scroll";
+  const calendar = document.createElement("div");
+  calendar.className = "heatmap-calendar";
+  const weeks = Math.ceil((selection.offset + selection.rows.length) / 7);
+  calendar.style.setProperty("--weeks", weeks);
+  const months = document.createElement("div");
+  months.className = "heatmap-months";
+  let lastMonthColumn = -10;
+  selection.rows.forEach((row, index) => {
+    const column = Math.floor((index + selection.offset) / 7);
+    if ((index === 0 || row.date.endsWith("-01")) && column - lastMonthColumn >= 4) {
+      const month = document.createElement("span");
+      month.textContent = `${row.date.slice(0, 4)}/${row.date.slice(5, 7)}`;
+      month.style.gridColumn = `${column + 1} / span 4`;
+      months.appendChild(month);
+      lastMonthColumn = column;
+    }
+  });
+  const grid = document.createElement("div");
+  grid.className = "heatmap-grid";
+  grid.setAttribute("role", "group");
+  grid.setAttribute("aria-label", `${label}每日 Token 热力图`);
+  const detail = document.createElement("p");
+  detail.className = "heatmap-detail";
+  detail.setAttribute("aria-live", "polite");
+  const buttons = [];
+  const describe = (row) => row.recorded
+    ? `${row.date} · ${formatNumber(row.totalTokens)} Token · ${formatCost(row.costUSD)}`
+    : `${row.date} · 无用量记录`;
+  for (let i = 0; i < selection.offset; i++) grid.appendChild(document.createElement("span"));
+  selection.rows.forEach((row, index) => {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "heatmap-cell";
+    cell.dataset.level = TrendData.level(row.totalTokens, selection.max);
+    cell.title = describe(row);
+    cell.setAttribute("aria-label", describe(row));
+    cell.tabIndex = index === selection.rows.length - 1 ? 0 : -1;
+    const inspect = () => {
+      detail.textContent = describe(row);
+      buttons.forEach((button) => { button.tabIndex = button === cell ? 0 : -1; });
+    };
+    cell.addEventListener("focus", inspect);
+    cell.addEventListener("mouseenter", () => { detail.textContent = describe(row); });
+    cell.addEventListener("click", inspect);
+    cell.addEventListener("keydown", (event) => {
+      const offset = { ArrowLeft: -7, ArrowRight: 7, ArrowUp: -1, ArrowDown: 1 }[event.key];
+      if (offset === undefined) return;
+      event.preventDefault();
+      buttons[Math.max(0, Math.min(buttons.length - 1, index + offset))]?.focus();
+    });
+    buttons.push(cell);
+    grid.appendChild(cell);
+  });
+  detail.textContent = describe(selection.rows.at(-1));
+  const weekdays = document.createElement("div");
+  weekdays.className = "heatmap-weekdays";
+  ["一", "", "三", "", "五", "", "日"].forEach((day) => {
+    const span = document.createElement("span"); span.textContent = day; weekdays.appendChild(span);
+  });
+  calendar.append(months, weekdays, grid);
+  wrap.appendChild(calendar);
+  const legend = document.createElement("div");
+  legend.className = "heatmap-legend";
+  legend.textContent = "每日 Token ";
+  ["missing", "0", "1", "2", "3", "4"].forEach((level, index) => {
+    const item = document.createElement("span");
+    const swatch = document.createElement("i");
+    swatch.className = "heatmap-cell";
+    swatch.dataset.level = level;
+    item.append(swatch, document.createTextNode(index === 0 ? "无记录" : index === 1 ? "0" : `≤ ${formatCompact(selection.max * (index - 1) / 4)}`));
+    legend.appendChild(item);
+  });
+  els.trendChart.append(wrap, legend, detail);
+  wrap.scrollLeft = wrap.scrollWidth;
+}
+
+function renderTrend(days, label) {
+  trendSource = { days, label };
+  els.trendChart.replaceChildren();
+  document.querySelector("#trendDates").hidden = trendSettings.range !== "custom";
+  document.querySelectorAll("[data-trend-mode]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.trendMode === trendSettings.mode));
+  });
+  const selection = TrendData.select(days.map((day) => ({ date: dayKey(day), totalTokens: day.totalTokens, costUSD: dayCost(day) })),
+    { ...trendSettings, start: trendStart.value, end: trendEnd.value }, localDateKey());
+  document.querySelector("#trendSummary").textContent = selection.error || `${formatCompact(selection.total)} Token · ${selection.recordedDays} 个记录日 / ${selection.rows.length} 天`;
+  els.rangePill.textContent = selection.error ? "--" : `${selection.start} - ${selection.end}`;
+  if (selection.error) {
+    els.trendChart.appendChild(emptyState(selection.error));
+    return;
+  }
+  if (trendSettings.mode === "heatmap") {
+    renderHeatmap(selection, label);
+    return;
+  }
+
+  if (!selection.recordedDays) {
     els.trendChart.appendChild(emptyState("暂无趋势数据"));
     return;
   }
 
-  const recent = days.slice(-24);
+  const recent = selection.rows;
   const maxTokens = Math.max(...recent.map((day) => Number(day.totalTokens) || 0), 1);
   const maxCost = Math.max(...recent.map(chartCost), 1);
   const width = 900;
@@ -1379,14 +1489,6 @@ function renderTrend(days, label) {
     const y = top + chartHeight - ((Number(day.totalTokens) || 0) / maxTokens) * chartHeight;
     return { x, y, day };
   });
-
-  const polyline = points.map((point) => `${point.x},${point.y}`).join(" ");
-  const area = [
-    `M ${points[0].x} ${top + chartHeight}`,
-    ...points.map((point) => `L ${point.x} ${point.y}`),
-    `L ${points.at(-1).x} ${top + chartHeight}`,
-    "Z",
-  ].join(" ");
 
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "trend-svg");
@@ -1417,14 +1519,15 @@ function renderTrend(days, label) {
     const costHeight = (chartCost(day) / maxCost) * (chartHeight * 0.42);
     const bar = document.createElementNS(svg.namespaceURI, "rect");
     bar.setAttribute("class", "cost-bar");
-    bar.setAttribute("x", x - 7);
+    const barWidth = Math.max(0.5, Math.min(14, step * 0.6));
+    bar.setAttribute("x", x - barWidth / 2);
     bar.setAttribute("y", top + chartHeight - costHeight);
-    bar.setAttribute("width", 14);
+    bar.setAttribute("width", barWidth);
     bar.setAttribute("height", costHeight);
     bar.setAttribute("rx", 3);
     svg.appendChild(bar);
 
-    if (index === 0 || index === recent.length - 1 || index % 5 === 0) {
+    if (index === 0 || index === recent.length - 1 || (index % Math.ceil(recent.length / 5) === 0 && index < recent.length - Math.ceil(recent.length / 10))) {
       const text = document.createElementNS(svg.namespaceURI, "text");
       text.setAttribute("class", "point-label");
       text.setAttribute("x", x);
@@ -1435,26 +1538,36 @@ function renderTrend(days, label) {
     }
   });
 
-  const pathArea = document.createElementNS(svg.namespaceURI, "path");
-  pathArea.setAttribute("class", "chart-area");
-  pathArea.setAttribute("d", area);
-  svg.appendChild(pathArea);
+  const segments = [];
+  let segment = [];
+  for (const point of points) {
+    if (point.day.recorded) segment.push(point);
+    else if (segment.length) { segments.push(segment); segment = []; }
+  }
+  if (segment.length) segments.push(segment);
+  for (const group of segments) {
+    const pathArea = document.createElementNS(svg.namespaceURI, "path");
+    pathArea.setAttribute("class", "chart-area");
+    pathArea.setAttribute("d", `M ${group[0].x} ${top + chartHeight} ${group.map((point) => `L ${point.x} ${point.y}`).join(" ")} L ${group.at(-1).x} ${top + chartHeight} Z`);
+    svg.appendChild(pathArea);
 
-  const line = document.createElementNS(svg.namespaceURI, "polyline");
-  line.setAttribute("class", "chart-line");
-  line.setAttribute("points", polyline);
-  svg.appendChild(line);
+    const line = document.createElementNS(svg.namespaceURI, "polyline");
+    line.setAttribute("class", "chart-line");
+    line.setAttribute("points", group.map((point) => `${point.x},${point.y}`).join(" "));
+    svg.appendChild(line);
+  }
 
   points.forEach((point) => {
+    if (!point.day.recorded) return;
     const dot = document.createElementNS(svg.namespaceURI, "circle");
     dot.setAttribute("class", "dot");
     dot.setAttribute("cx", point.x);
     dot.setAttribute("cy", point.y);
-    dot.setAttribute("r", 4);
+    dot.setAttribute("r", recent.length > 90 ? 1.5 : 4);
     svg.appendChild(dot);
 
     const title = document.createElementNS(svg.namespaceURI, "title");
-    const estimated = Billing.estimateDayCost(point.day);
+    const estimated = { amount: Number(point.day.costUSD) || 0, currency: "USD" };
     title.textContent = `${dayDate(point.day)}: ${formatNumber(point.day.totalTokens)} tokens, ${formatCost(estimated.amount, estimated.currency)}`;
     dot.appendChild(title);
   });
@@ -1463,90 +1576,6 @@ function renderTrend(days, label) {
   els.trendChart.appendChild(svg);
 }
 
-function renderCalendarHeatmap(days) {
-  els.calendarHeatmap.replaceChildren();
-  const heatmapApi = globalThis.CalendarHeatmap;
-  if (!heatmapApi || !days.length) {
-    els.heatmapRangePill.textContent = "--";
-    els.heatmapSummary.textContent = "暂无每日用量记录";
-    els.calendarHeatmap.setAttribute("aria-label", "暂无每日 Token 用量记录");
-    els.calendarHeatmap.appendChild(emptyState("暂无每日用量记录"));
-    return;
-  }
-
-  const model = heatmapApi.buildCalendarHeatmap(days, {
-    today: localDateKey(),
-    minWeeks: 13,
-    maxWeeks: 53,
-  });
-  if (!model.cells.length) {
-    els.heatmapRangePill.textContent = "--";
-    els.heatmapSummary.textContent = "暂无每日用量记录";
-    els.calendarHeatmap.setAttribute("aria-label", "暂无每日 Token 用量记录");
-    els.calendarHeatmap.appendChild(emptyState("暂无每日用量记录"));
-    return;
-  }
-
-  els.heatmapRangePill.textContent = `${model.rangeStart} - ${model.rangeEnd}`;
-  els.heatmapSummary.textContent = `${model.weekCount} 周共 ${formatCompact(model.totalTokens)} Token · ${model.activeDays} 个活跃日`;
-  els.calendarHeatmap.setAttribute(
-    "aria-label",
-    `${model.rangeStart}至${model.rangeEnd}的每日 Token 用量，共${model.activeDays}个活跃日`
-  );
-
-  const shell = document.createElement("div");
-  shell.className = "calendar-heatmap-shell";
-
-  const weekdays = document.createElement("div");
-  weekdays.className = "calendar-heatmap-weekdays";
-  const spacer = document.createElement("span");
-  spacer.setAttribute("aria-hidden", "true");
-  weekdays.appendChild(spacer);
-  ["一", "二", "三", "四", "五", "六", "日"].forEach((label, index) => {
-    const dayLabel = document.createElement("span");
-    dayLabel.textContent = index % 2 === 0 || index === 6 ? label : "";
-    dayLabel.setAttribute("aria-hidden", "true");
-    weekdays.appendChild(dayLabel);
-  });
-  shell.appendChild(weekdays);
-
-  const content = document.createElement("div");
-  content.className = "calendar-heatmap-content";
-  content.style.setProperty("--week-count", model.weekCount);
-
-  const months = document.createElement("div");
-  months.className = "calendar-heatmap-months";
-  months.setAttribute("aria-hidden", "true");
-  model.months.forEach((month) => {
-    const label = document.createElement("span");
-    label.className = "calendar-heatmap-month";
-    label.style.gridColumn = String(month.column);
-    label.textContent = month.label;
-    months.appendChild(label);
-  });
-  content.appendChild(months);
-
-  const grid = document.createElement("div");
-  grid.className = "calendar-heatmap-grid";
-  model.cells.forEach((day) => {
-    const cell = document.createElement("span");
-    cell.className = `calendar-heatmap-cell level-${day.level}`;
-    if (day.outside) {
-      cell.classList.add("is-outside");
-      cell.setAttribute("aria-hidden", "true");
-    } else {
-      const description = `${day.date} · ${formatNumber(day.totalTokens)} Token`;
-      cell.title = description;
-      cell.setAttribute("aria-label", description);
-      cell.setAttribute("role", "img");
-      if (day.date === localDateKey()) cell.classList.add("is-today");
-    }
-    grid.appendChild(cell);
-  });
-  content.appendChild(grid);
-  shell.appendChild(content);
-  els.calendarHeatmap.appendChild(shell);
-}
 
 function renderBreakdown(days) {
   els.breakdown.replaceChildren();
@@ -1662,15 +1691,15 @@ function renderBillingRates(view, days) {
   els.billingTitle.textContent = view === "overview" ? "API 参考单价" : `${(VIEW_CONFIGS[view] || {}).label || "模型"} API 参考单价`;
   const hasCny = rates.some((rate) => rate.currency === "CNY");
   els.billingNote.textContent = used.size
-    ? `单价为每百万 token。Kimi 与 DeepSeek 为人民币价，其余为美元。当前账本用到 ${used.size} 个型号，已在表中标出。`
+    ? `单价为每百万 token。币种按各型号标注，人民币与美元汇总时按固定汇率换算。当前账本用到 ${used.size} 个型号，已在表中标出。`
     : hasCny
       ? "Kimi 与 DeepSeek 保留官方人民币价；其余为美元。当前页还没有对上账本里的型号。"
       : "单价为每百万 token 的美元价，用来估算本地 Token 成本。当前页还没有对上账本里的型号。";
 
   els.billingRows.replaceChildren();
   if (view === "opencode") {
-    els.billingNote.textContent = "按完整模型路由匹配；GLM-5.3-Flash 使用智谱官方 API 直连人民币标准价估算，2026-09-21 核验，不含限时折扣。实际调用仍走方舟；未核价版本保留 Token 记录并标注待核价。";
-    els.billingRatePill.textContent = "路由价格核验：2026-09-21";
+    els.billingNote.textContent = "按完整模型路由匹配；GLM-5.3-Flash 使用智谱官方 API 直连人民币标准价估算，2026-09-23 核验，不含限时折扣。实际调用仍走方舟；未核价版本保留 Token 记录并标注待核价。";
+    els.billingRatePill.textContent = "路由价格核验：2026-09-23";
   }
   rates.forEach((rate) => {
     const row = document.createElement("tr");
@@ -1894,7 +1923,6 @@ function renderUsage(data, view, bundle = {}) {
 
   renderMetrics(days, data.totals || {}, view, bundle);
   renderTrend(days, config.label);
-  if (view === "overview") renderCalendarHeatmap(days);
   renderBreakdown(days);
   renderModels(days);
   renderBillingRates(view, days);
@@ -1916,7 +1944,6 @@ function setViewVisibility(view) {
   els.forecastView.classList.toggle("is-hidden", !isForecast);
   els.resetPlannerView.classList.toggle("is-hidden", !isResetPlanner);
   els.metricGrid.classList.toggle("is-hidden", isForecast || isResetPlanner);
-  els.calendarHeatmapPanel.classList.toggle("is-hidden", view !== "overview");
   els.sourceCompare.classList.toggle("is-hidden", !(view === "overview" || isSources));
   els.detailGrid.classList.toggle("is-hidden", !isUsageView);
   els.lowerGrid.classList.toggle("is-hidden", !isUsageView);
@@ -2025,6 +2052,7 @@ function renderResetPlan(provider, forecast, result, loadError) {
     "stale-quota": "账户额度快照已超过 6 小时，请刷新全部数据后查看安排。",
     "stale-usage": "Token 快照过旧或与账户额度的采集时间相差超过 1 小时，请刷新全部数据后重算。",
     "no-recent-usage": "近期尚无可用 Token 速率，等待产生用量后重新计算。",
+    "censored-demand-unavailable": "额度耗尽期间的需求尚不明确，可观测时段不足，暂缓定量规划。不会把受限零消耗当成低需求。有工作待完成且额度已用尽时，可考虑最早到期的 reset。",
     "insufficient-fit": "仍需至少 2 个有效消耗区间校准额度。当前建议：有工作待完成时，优先在额度接近耗尽后使用最早到期的 reset。",
     "weak-fit": "历史额度与 Token 的对应关系暂不稳定，等待更多有效区间后生成时间表。",
     "model-calibrating": "近期模型额度校准中：主要模型需至少 3 个有效扣减区间并通过权重检查，不沿用其他模型的旧权重。历史记录保留，官方余额仍正常展示。",
@@ -2096,6 +2124,7 @@ function renderResetPlan(provider, forecast, result, loadError) {
       <table><thead><tr><th>Reset</th><th>建议时间</th><th>届时剩余</th><th>新的自然重置</th></tr></thead><tbody>${schedule}</tbody></table>
     </div>
     <p class="reset-plan-basis">当前剩余 ${result.remainingPercent.toFixed(0)}% · 自然重置 ${plannerTime(result.resetAt)} · ${result.intervalCount} 个有效区间 · 拟合 R² ${result.fitQuality.toFixed(2)} · ${forecast.modelFit?.active ? "已按近期模型组合换算" : "按原始 Token 拟合"}</p>
+    ${result.demand?.adjusted ? `<p class="reset-plan-basis">受限需求修正：${escapeHtml(demandStatus(result.demand))}。实际记录日均 ${formatCompact(forecast.rawRate.observedWeightedRate || 0)} 原始 Token；续工需求估计 ${formatCompact(result.dailyTokens)} 原始 Token / 日。未知待办不自动补入账本，也不承诺这些需求一定发生。</p>` : ""}
     <details class="reset-plan-details reset-plan-proof"><summary>${proofLabel}</summary>
       <p>全期方案由动态规划计算，枚举允许的重置时刻而不截断候选状态。当前网格 ${Math.round(certificate.stepMs / 60000)} 分钟，另含到期和原定自然恢复边界；${certificate.gridPoints} 个时间点。</p>
       <p>在当前需求和周期假设下，连续时间的累计可用额度上界为 ${certificate.continuousUpperPercent.toFixed(1)} 点，当前安排距上界 ${gapLabel} 点。差为零时证明此模型内全局最优；非零时仅证明网格内最优，上界可能较松。</p>
@@ -2107,11 +2136,12 @@ function renderResetPlan(provider, forecast, result, loadError) {
         <ol class="reset-target-actions">${alternative.actions.map((action) => `<li>${plannerTime(action.at)} 附近 · 使用 ${plannerTime(action.expiresAt)} 到期的 reset · 届时剩余 ${action.discardedPercent.toFixed(1)}%</li>`).join("")}</ol>`).join("")}
     </details>` : ""}
     <details class="reset-plan-details reset-plan-stress"><summary>历史波动压力检验</summary>
-      ${stress.ready ? `<p>最近 ${stress.sampleDays} 个完整日，连续 3 日分块抽样，检验同一时间表的 8 条需求路径；其中 4 条额外假设每天集中在 6 小时内工作。</p>
+      <p>排除 ${stress.excludedDays || 0} 个受限或不确定日，不将其当作零需求，也不拼接缺口两侧的日期。</p>
+      ${stress.ready ? `<p>最近 ${stress.sampleDays} 个可用完整日，从 ${stress.blockCount} 个原日历连续 3 日块抽样，检验同一时间表的 8 条需求路径；其中 4 条额外假设每天集中在 6 小时内工作。</p>
         <p>相对各自路径下不重置：平均多用 ${stress.meanGainPercent.toFixed(1)} 点额度，范围 ${stress.minGainPercent.toFixed(1)} 至 ${stress.maxGainPercent.toFixed(1)} 点；${stress.negativeCases} / 8 条路径收益为负。</p>
         <p>固定安排平均仍有 ${stress.meanUnservedPercent.toFixed(1)} 点额度需求未能及时满足。改为有工作且用尽时才重置，平均相对固定安排多用 ${stress.meanReactiveAdvantagePercent.toFixed(1)} 点额度，${stress.reactiveWorseCases} / 8 条路径反而更差。</p>
         <p>保留连续高低负载日，不使用未来信息改写各条路径的时间表。此处不是概率预测或随机最优策略；6 小时集中工作是压力假设，并非从日总量推断的作息。</p>`
-      : `<p>需要至少 14 个完整日、其中至少 4 日有用量，当前有 ${stress.sampleDays} 日。暂不生成随机波动结论。</p>`}
+      : `<p>需要至少 14 个可用完整日、其中至少 4 日有用量，并存在连续 3 日块，当前有 ${stress.sampleDays} 日、${stress.blockCount || 0} 个块。暂不生成随机波动结论。</p>`}
     </details>
     <details class="reset-plan-details"><summary>消耗变化与计算假设</summary>
       <div class="reset-plan-table" tabindex="0" aria-label="消耗情景对比"><table><thead><tr><th>情景</th><th>额度需求</th><th>额外可用额度</th><th>首次重置</th></tr></thead><tbody>${scenarios}</tbody></table></div>
@@ -2123,6 +2153,18 @@ function renderResetPlan(provider, forecast, result, loadError) {
       ${result.truncated ? "<p>计算范围最多 60 天、24 张可识别 reset；未纳入部分保留在库存，下次刷新重新评估。</p>" : ""}
     </details>`;
   return section;
+}
+
+async function fetchResetInventory(source) {
+  try {
+    const response = await fetch(`/api/reset-credits?source=${encodeURIComponent(source)}`, { cache: "no-store" });
+    const data = await response.json();
+    return { ...data, source, ok: response.ok && data.ok === true,
+      message: data.message || (!response.ok ? `HTTP ${response.status}` : data.ok !== true ? "重置库存读取失败" : null),
+      source_label: data.source_label || providerMeta[source]?.label || source };
+  } catch (error) {
+    return { source, source_label: providerMeta[source]?.label || source, ok: false, message: error.message };
+  }
 }
 
 async function loadResetPlannerView() {
@@ -2137,14 +2179,15 @@ async function loadResetPlannerView() {
     return;
   }
   const sections = [];
+  const failures = [];
   for (const provider of providers) {
     try {
       const [usage, quota, credits] = await Promise.all([
         fetchUsage(provider.id), fetchQuota(provider.id),
-        fetch(`/api/reset-credits?source=${encodeURIComponent(provider.id)}`, { cache: "no-store" })
-          .then((response) => response.json()),
+        fetchResetInventory(provider.id),
       ]);
       if (generation !== resetPlannerGeneration || currentView !== "resets") return;
+      if (!credits.ok) throw new Error(`重置库存读取失败：${credits.message}`);
       forecastSnapshots[provider.id] = usage;
       forecastQuotas[provider.id] = quota;
       const policy = credits.planningPolicy;
@@ -2153,7 +2196,7 @@ async function loadResetPlannerView() {
       const forecast = buildForecast(provider.id, window?.name);
       const usedPercent = inputNumberOrNull(window?.usedPercent);
       const result = await calculateResetPlan({
-        credits, policy,
+        now: Date.now(), credits, policy,
         remainingPercent: inputNumberOrNull(window?.remainingPercent)
           ?? (usedPercent === null ? null : 100 - usedPercent),
         resetAt: window?.resetsAt, windowDurationMins: window?.windowDurationMins,
@@ -2164,11 +2207,13 @@ async function loadResetPlannerView() {
         percentPerDay: forecast.quotaFit?.percentPerDay,
         intervalCount: forecast.quotaFit?.intervalCount ?? Math.max(0, (forecast.quotaFit?.sampleCount || 0) - 1),
         rSquared: forecast.quotaFit?.model?.rSquared,
-        recentDailyTokens: resetStressHistory(forecast.effectiveDays),
+        demand: forecast.rate.demand,
+        recentDailyTokens: forecast.rate.stressHistory,
       });
       if (generation !== resetPlannerGeneration || currentView !== "resets") return;
       sections.push(renderResetPlan(provider, forecast, result));
     } catch (error) {
+      failures.push({ source: `reset:${provider.id}`, ok: false, error: error.message });
       sections.push(renderResetPlan(provider, null, null, `暂时无法分析：${error.message}`));
     }
     // Yield between providers so navigating away stays responsive during a large search.
@@ -2176,7 +2221,9 @@ async function loadResetPlannerView() {
   }
   if (generation !== resetPlannerGeneration || currentView !== "resets") return;
   els.resetPlannerProviders.replaceChildren(...sections);
-  setStatus("重置规划已更新，实际使用前请核对当前余额与到期时间", "ok");
+  setStatus(failures.length ? `重置规划部分读取失败：${failures.map((item) => `${item.source}（${item.error}）`).join("；")}`
+    : "重置规划已更新，实际使用前请核对当前余额与到期时间", failures.length ? "error" : "ok");
+  return failures;
 }
 
 async function loadView(view = currentView) {
@@ -2196,8 +2243,7 @@ async function loadView(view = currentView) {
 
   try {
     if (currentView === "resets") {
-      await loadResetPlannerView();
-      return;
+      return await loadResetPlannerView();
     }
     if (currentView === "sources") {
       await loadSourcesView();
@@ -2229,41 +2275,46 @@ async function loadView(view = currentView) {
 }
 
 async function loadResetCredits() {
-  if (!els.resetSummary) return;
+  if (!els.resetSummary) return [];
+  const generation = resetPlannerGeneration;
   const sources = currentView === "overview"
     ? visibleProviders().filter((provider) => provider.resetCredits).map((provider) => provider.id)
     : providerMeta[currentView]?.resetCredits ? [currentView] : [];
-  if (!sources.length) return;
+  if (!sources.length) return [];
   els.resetSummary.textContent = "正在读取可用重置额度...";
 
   try {
-    const payloads = await Promise.all(sources.map(async (source) => {
-      const response = await fetch(`/api/reset-credits?source=${encodeURIComponent(source)}`, { cache: "no-store" });
-      const data = await response.json();
-      return { ...data, source, source_label: data.source_label || providerMeta[source]?.label || source };
-    }));
+    const payloads = await Promise.all(sources.map(fetchResetInventory));
+    if (generation !== resetPlannerGeneration) return [];
+    const failures = payloads.filter((payload) => !payload.ok)
+      .map((payload) => ({ source: `reset:${payload.source}`, ok: false, error: payload.message }));
+    if (failures.length) setStatus(`重置额度读取失败：${failures.map((item) => `${item.source}（${item.error}）`).join("；")}`, "error");
     if (payloads.length === 1) {
       renderResetCredits(payloads[0]);
-      return;
+      return failures;
     }
     const successful = payloads.filter((payload) => payload.ok);
     renderResetCredits({
       ok: successful.length > 0,
+      partial: failures.length > 0,
       message: payloads.map((payload) => `${payload.source_label}：${payload.message || "读取失败"}`).join("；"),
       summary: payloads.map((payload) => payload.ok
         ? `${payload.source_label} 可用 ${Number(payload.available_count) || 0} 次`
-        : `${payload.source_label} 暂不可用`).join("；"),
+        : `${payload.source_label}：${payload.message || "读取失败"}`).join("；"),
       available_count: successful.reduce((sum, payload) => sum + (Number(payload.available_count) || 0), 0),
       credits: successful.flatMap((payload) => (payload.credits || []).map((credit) => ({
         ...credit,
         title: `${payload.source_label} · ${credit.title || "Rate-limit reset"}`,
       }))),
     });
+    return failures;
   } catch (error) {
     renderResetCredits({
       ok: false,
       message: `读取重置额度失败：${error.message}`,
     });
+    setStatus(`重置额度读取失败：${error.message}`, "error");
+    return sources.map((source) => ({ source: `reset:${source}`, ok: false, error: error.message }));
   }
 }
 
@@ -2280,18 +2331,22 @@ async function exportAndRefresh(scope = "current") {
       throw new Error(data.stderr || data.error || `HTTP ${response.status}`);
     }
 
-    await loadView(currentView);
-    if (data.partial) {
-      const failed = (data.results || [])
-        .filter((item) => !item.ok)
+    const viewFailures = await loadView(currentView);
+    const creditFailures = await loadResetCredits();
+    const failures = [...new Map([
+      ...(data.results || []).filter((item) => !item.ok || item.partial),
+      ...(Array.isArray(viewFailures) ? viewFailures : []), ...creditFailures,
+    ].map((item) => [item.source, item])).values()];
+    if (data.partial || failures.length) {
+      const failed = failures
         .map((item) => {
-          const error = String(item.error || item.warning || "");
+          const error = String(item.error || item.warning || item.warnings?.join("; ") || "");
           if (item.source === "quota:claude" && /claude auth login/i.test(error)) {
             return "quota:claude（需重新登录 Claude Code）";
           }
-          return item.source;
+          return error ? `${item.source}（${error.slice(0, 220)}）` : item.source;
         })
-        .join(", ");
+        .join(", ") || "后台返回部分失败，请检查数据源状态";
       setStatus(`部分导出完成，失败来源：${failed}`, "error");
     } else {
       setStatus(exportSource === "everything" ? "已导出并刷新全部数据源" : "已导出并刷新当前视图", "ok");
@@ -2299,7 +2354,6 @@ async function exportAndRefresh(scope = "current") {
   } catch (error) {
     setStatus(`导出刷新失败：${error.message}`, "error");
   } finally {
-    await loadResetCredits();
     els.exportBtn.disabled = false;
     els.refreshBtn.disabled = false;
   }
