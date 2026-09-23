@@ -45,6 +45,20 @@ CNY/USD reference rate; it is not a live FX feed.
 
 ## Validation
 
-129 automated tests passed after integration, including provider routes,
+131 automated tests passed after integration, including provider routes,
 currency conversion, Beijing day boundaries, upstream trend ranges, refresh
 results and quota prediction. Runtime and browser checks are recorded locally.
+
+## Final code audit
+
+Removed the superseded standalone calendar implementation and its tests;
+the upstream trend component owns both line and heatmap modes. Recent metrics
+now select calendar days, excluding older sparse records and future dates.
+Overview totals convert CNY to USD explicitly, retain recorded time-priced
+model costs, and preserve zero-cost entries. Latest-day labels use that day's
+currency. Grok's price list excludes unrelated Cursor Composer entries.
+New price entries follow a readable multiline format.
+
+The existing large UI and collector modules remain a maintenance concern.
+This integration avoids a broad structural rewrite while changing accounting
+and upstream behavior; targeted regression tests cover the fixes above.

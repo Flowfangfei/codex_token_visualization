@@ -401,7 +401,6 @@ function formatPercent(value) {
 const FORECAST_AGENT_META = {};
 
 function localDateKey(date = new Date()) {
-  const pad = (value) => String(value).padStart(2, "0");
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
@@ -1281,7 +1280,10 @@ function renderMetric(label, value, sub) {
 }
 
 function sumRecent(days, read, count = 30) {
-  return days.slice(-count).reduce((sum, day) => sum + read(day), 0);
+  const end = localDateKey();
+  const start = addDays(end, 1 - count);
+  return days.filter((day) => dayKey(day) >= start && dayKey(day) <= end)
+    .reduce((sum, day) => sum + read(day), 0);
 }
 
 function activeAgentCount(days) {
@@ -1306,7 +1308,7 @@ function renderMetrics(days, totals, view, bundle = {}) {
   const latest = days.at(-1);
   const latestTotal = Number(latest.totalTokens) || 0;
   const totalTokenCount = totalsTokens(totals, days);
-  const totalCost = totalsCost(totals, days);
+  const totalCost = view === "overview" ? Billing.estimateDaysCost(days) : totalsCost(totals, days);
   const currency = costCurrency(days, totals);
   const totalParts = tokenParts(totals?.totalTokens ? totals : days.reduce(
     (sum, day) => {
@@ -1329,15 +1331,16 @@ function renderMetrics(days, totals, view, bundle = {}) {
 
     const today = days.find((day) => dayKey(day) === localDateKey());
     renderMetric("今日总用量", formatCompact(Number(today?.totalTokens) || 0), `${localDateKey()} · ${formatCost(today ? dayCost(today) : 0)}`);
-    renderMetric("累计 Token", formatCompact(totalTokenCount), `最近 30 条记录 ${formatCompact(recentTotal)}`);
+    renderMetric("累计 Token", formatCompact(totalTokenCount), `最近 30 天 ${formatCompact(recentTotal)}`);
     renderMetric("近 30 日费用", formatCost(recentCost), `累计 ${formatCost(totalCost)} · ${billingCaption(days)}`);
     renderMetric("活跃来源", `${sourceCount || activeAgentCount(days)} 个`, visibleProviders().map((entry) => entry.shortLabel || entry.label).join(" / "));
     return;
   }
 
   const recentTotal = sumRecent(days, (day) => Number(day.totalTokens) || 0, 30);
-  renderMetric("最新日期", formatCompact(latestTotal), `${dayDate(latest)} · ${formatCost(Billing.estimateDayCost(latest).amount, currency)}`);
-  renderMetric("累计 Token", formatCompact(totalTokenCount), `最近 30 条记录 ${formatCompact(recentTotal)}`);
+  const latestCost = Billing.estimateDayCost(latest);
+  renderMetric("最新日期", formatCompact(latestTotal), `${dayDate(latest)} · ${formatCost(latestCost.amount, latestCost.currency)}`);
+  renderMetric("累计 Token", formatCompact(totalTokenCount), `最近 30 天 ${formatCompact(recentTotal)}`);
   renderMetric("缓存读取占比", formatPercent(cacheShare), `${formatCompact(totalParts.cachedInput)} cache read`);
   renderMetric("费用估算", formatCost(totalCost, currency), billingCaption(days));
 }
@@ -1837,6 +1840,8 @@ function mergeUsageSnapshots(bundle) {
       for (const model of dayModels(sourceDay)) {
         day.modelBreakdowns.push({
           ...model,
+          timedBilling: model.timedBilling || sourceDay.timedBilling || sourceDay.costCurrency === "CNY",
+          costCurrency: model.costCurrency || sourceDay.costCurrency,
           modelName: `${provider.shortLabel || provider.label} · ${model.modelName || model.name || "unknown"}`,
         });
       }
@@ -1878,7 +1883,7 @@ function renderOverviewSources(bundle) {
       </div>
       <div class="source-card-meta">
         <span>${formatCost(summary.cost, summary.currency)}</span>
-        <span>近 30 条 ${formatCompact(summary.recent)}</span>
+        <span>近 30 日 ${formatCompact(summary.recent)}</span>
       </div>
     `;
     els.sourceCompare.appendChild(node);

@@ -35,13 +35,147 @@
   ]);
 
   const RATES = Object.freeze([
-    rate({"id":"gpt-6-sol","vendor":"openai","label":"GPT-6 Sol","input":2,"cacheRead":0.2,"cacheWrite":2.5,"output":10,"longContext":{"threshold":272000,"input":4,"cacheRead":0.4,"cacheWrite":5,"output":15},"source":"https://developers.openai.com/api/docs/pricing","routes":["gpt-6-sol"],"aliases":["gpt-6-sol"]}),
-    rate({"id":"gpt-6-luna","vendor":"openai","label":"GPT-6 Luna","input":0.1,"cacheRead":0.01,"cacheWrite":0.125,"output":0.5,"longContext":{"threshold":272000,"input":0.2,"cacheRead":0.02,"cacheWrite":0.25,"output":0.75},"source":"https://developers.openai.com/api/docs/pricing","routes":["gpt-6-luna"],"aliases":["gpt-6-luna"]}),
-    rate({"id":"claude-opus-5.5","vendor":"anthropic","label":"Claude Opus 5.5","aliases":["claude-opus-5-5","opus-5.5","opus-5-5"],"input":4,"cacheRead":0.2,"cacheWrite":5,"output":20,"source":"https://platform.claude.com/docs/en/about-claude/pricing","routes":["claude-opus-5.5"]}),
-    rate({"id":"grok-4.7","vendor":"xai","label":"Grok 4.7","input":2,"cacheRead":0.5,"output":6,"longContext":{"threshold":200000,"input":4,"cacheRead":1,"output":12},"source":"https://docs.x.ai/developers/pricing","routes":["grok-4.7"],"aliases":["grok-4.7"]}),
-    rate({"id":"cursor-grok-4.7-fast","vendor":"cursor","label":"Grok 4.7 Fast · Cursor / Grok Build","routes":["grok-4.7-fast"],"aliases":["grok-4.7-fast","grok-4-7-fast"],"input":4,"cacheRead":1,"output":12,"longContext":{"threshold":200000,"input":6,"cacheRead":1.5,"output":18},"note":"Cursor / Grok Build 专用；无公共 xAI API Fast 路由。","source":"https://docs.x.ai/developers/pricing"}),
-    rate({"id":"glm-5.3","vendor":"zhipu","label":"GLM-5.3","currency":"CNY","routes":["glm-5.3"],"input":8,"cacheRead":2,"output":28,"source":"https://bigmodel.cn/pricing","aliases":["glm-5.3"]}),
-    rate({"id":"glm-5.3-flash","vendor":"zhipu","label":"GLM-5.3-Flash","currency":"CNY","routes":["glm-5.3-flash"],"input":0.8,"cacheRead":0.23,"output":2.8,"note":"官方 API 标准价，不含限时折扣。","source":"https://bigmodel.cn/pricing","aliases":["glm-5.3-flash"]}),
+    rate({
+      "id": "gpt-6-sol",
+      "vendor": "openai",
+      "label": "GPT-6 Sol",
+      "input": 2,
+      "cacheRead": 0.2,
+      "cacheWrite": 2.5,
+      "output": 10,
+      "longContext": {
+        "threshold": 272000,
+        "input": 4,
+        "cacheRead": 0.4,
+        "cacheWrite": 5,
+        "output": 15
+      },
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "routes": [
+        "gpt-6-sol"
+      ],
+      "aliases": [
+        "gpt-6-sol"
+      ]
+    }),
+    rate({
+      "id": "gpt-6-luna",
+      "vendor": "openai",
+      "label": "GPT-6 Luna",
+      "input": 0.1,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.125,
+      "output": 0.5,
+      "longContext": {
+        "threshold": 272000,
+        "input": 0.2,
+        "cacheRead": 0.02,
+        "cacheWrite": 0.25,
+        "output": 0.75
+      },
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "routes": [
+        "gpt-6-luna"
+      ],
+      "aliases": [
+        "gpt-6-luna"
+      ]
+    }),
+    rate({
+      "id": "claude-opus-5.5",
+      "vendor": "anthropic",
+      "label": "Claude Opus 5.5",
+      "aliases": [
+        "claude-opus-5-5",
+        "opus-5.5",
+        "opus-5-5"
+      ],
+      "input": 4,
+      "cacheRead": 0.2,
+      "cacheWrite": 5,
+      "output": 20,
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "routes": [
+        "claude-opus-5.5"
+      ]
+    }),
+    rate({
+      "id": "grok-4.7",
+      "vendor": "xai",
+      "label": "Grok 4.7",
+      "input": 2,
+      "cacheRead": 0.5,
+      "output": 6,
+      "longContext": {
+        "threshold": 200000,
+        "input": 4,
+        "cacheRead": 1,
+        "output": 12
+      },
+      "source": "https://docs.x.ai/developers/pricing",
+      "routes": [
+        "grok-4.7"
+      ],
+      "aliases": [
+        "grok-4.7"
+      ]
+    }),
+    rate({
+      "id": "cursor-grok-4.7-fast",
+      "vendor": "cursor",
+      "label": "Grok 4.7 Fast · Cursor / Grok Build",
+      "routes": [
+        "grok-4.7-fast"
+      ],
+      "aliases": [
+        "grok-4.7-fast",
+        "grok-4-7-fast"
+      ],
+      "input": 4,
+      "cacheRead": 1,
+      "output": 12,
+      "longContext": {
+        "threshold": 200000,
+        "input": 6,
+        "cacheRead": 1.5,
+        "output": 18
+      },
+      "note": "Cursor / Grok Build 专用；无公共 xAI API Fast 路由。",
+      "source": "https://docs.x.ai/developers/pricing"
+    }),
+    rate({
+      "id": "glm-5.3",
+      "vendor": "zhipu",
+      "label": "GLM-5.3",
+      "currency": "CNY",
+      "routes": [
+        "glm-5.3"
+      ],
+      "input": 8,
+      "cacheRead": 2,
+      "output": 28,
+      "source": "https://bigmodel.cn/pricing",
+      "aliases": [
+        "glm-5.3"
+      ]
+    }),
+    rate({
+      "id": "glm-5.3-flash",
+      "vendor": "zhipu",
+      "label": "GLM-5.3-Flash",
+      "currency": "CNY",
+      "routes": [
+        "glm-5.3-flash"
+      ],
+      "input": 0.8,
+      "cacheRead": 0.23,
+      "output": 2.8,
+      "note": "官方 API 标准价，不含限时折扣。",
+      "source": "https://bigmodel.cn/pricing",
+      "aliases": [
+        "glm-5.3-flash"
+      ]
+    }),
     rate({
       id: "volcengine/glm-5-3-flash-260828",
       vendor: "volcengine",
@@ -603,6 +737,12 @@
     const parts = usageParts(usage);
     const matched = matchRate(modelName, usage?.billingProvider);
     const name = String(modelName || usage?.modelName || usage?.name || "unknown-model");
+    if (usage?.timedBilling === true && ["USD", "CNY"].includes(usage.costCurrency)
+      && [usage.costUSD, usage.totalCost, usage.cost].some((value) => value != null)) {
+      const amount = recordedCost(usage);
+      return { modelName: name, rate: matched, amount, currency: usage.costCurrency,
+        usd: toUsd(amount, usage.costCurrency), window: "recorded", matched: true, ...parts };
+    }
     if (!matched) {
       return {
         modelName: name,
@@ -667,7 +807,9 @@
     const timed = day?.timedBilling === true || day?.costCurrency === "CNY";
     if (timed) {
       const storedModels = models.reduce((sum, model) => sum + recordedCost(model), 0);
-      const amount = storedModels || recordedCost(day);
+      const hasStoredModels = models.some((model) =>
+        [model.costUSD, model.totalCost, model.cost].some((value) => value != null));
+      const amount = hasStoredModels ? storedModels : recordedCost(day);
       const currency = timedCurrency(day, models);
       const parts = usageParts(day);
       return {
@@ -679,15 +821,9 @@
         matchedTokens: parts.tokens,
         unmatchedTokens: 0,
         fallback: false,
-        models: models.map((model) => {
-          const estimated = estimateUsageCost(model, model.modelName || model.name);
-          const native = recordedCost(model);
-          return {
-            ...estimated,
-            amount: native || estimated.amount,
-            usd: native ? toUsd(native, currency) : estimated.usd,
-          };
-        }),
+        models: models.map((model) => estimateUsageCost({
+          ...model, timedBilling: true, costCurrency: model.costCurrency || currency,
+        }, model.modelName || model.name)),
       };
     }
 
@@ -713,7 +849,6 @@
     const matchedTokens = details.reduce((sum, item) => sum + (item.matched ? item.tokens : 0), 0);
     const unmatchedTokens = details.reduce((sum, item) => sum + (item.matched ? 0 : item.tokens), 0);
     const currencies = new Set(details.filter((item) => item.matched).map((item) => item.currency));
-    const currency = currencies.size === 1 ? [...currencies][0] : "USD";
     if (details.some((item) => !item.matched && item.usd > 0)) currencies.add("USD");
     const totalCurrency = currencies.size === 1 ? [...currencies][0] : "USD";
     const priced = details.reduce((sum, item) => sum + (currencies.size > 1 ? item.usd : item.amount), 0);
@@ -849,7 +984,9 @@
     const vendors = PROVIDER_VENDORS[providerId];
     if (!vendors) return [...RATES];
     const allowed = new Set(vendors);
-    return RATES.filter((entry) => allowed.has(entry.vendor));
+    return RATES.filter((entry) => allowed.has(entry.vendor)
+      && (!["grok", "grok-build"].includes(providerId)
+        || entry.vendor !== "cursor" || entry.id.startsWith("cursor-grok-")));
   }
 
   function routesForProvider(providerId) {
