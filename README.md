@@ -297,16 +297,24 @@ flowchart LR
 
 ## 数据源与账户同步
 
-| 来源 | 本地 token 数据 | 账户额度数据 | 自动周期 |
+用量统计和账户额度分别采集。用量记录按北京时间汇总为每日 token 账本；账户同步提供已用比例、重置时间和可用的 reset credits。当前版本的数据来源如下：
+
+| 工具 | Token 数据来源与读取方式 | 账户同步 | 统计范围 |
 | --- | --- | --- | --- |
-| Codex | `ccusage codex daily --json` | 本机 `codex app-server` 的 `account/rateLimits/read` | 周级及以上窗口；更短窗口只保留在原始快照 |
-| Claude Code | `ccusage claude daily --json` | 本机 Claude OAuth 登录态请求 usage 窗口 | 7 天总额，以及接口实际开放的 Opus、Sonnet、Fable 等周级模型窗口 |
-| Cursor | 最近 90 天 Cursor usage events 聚合 | Cursor usage summary | Cursor 账期、Included in Pro、Auto + Composer、API |
-| Kimi | CLI `~/.kimi-code/sessions/**/wire.jsonl` + 桌面应用嵌入式 Kimi Code `sessions/**/wire.jsonl` | Kimi 会员 subscription stats + Kimi Code managed usage | 会员月总额及 Kimi / Code 构成、周额度与各自重置时间 |
-| OpenCode | `~/.local/share/opencode/opencode.db` 中的 assistant token 字段 | 无统一账户口径 | 不生成额度窗口 |
-| DeepSeek Harness | `.dsh-home/sessions/**/session.jsonl.zstd` 中的 usage 事件 | 未发现可验证的本机统一额度接口 | 不生成额度窗口 |
-| Grok | `~/.grok/sessions/**/updates.jsonl` 中主会话的 `turn_completed` usage | 不读取账号额度 | 不生成额度窗口 |
-| Grok Build | `~/.grok/sessions/**/updates.jsonl` 中的 `turn_completed.usage` | 官方 CLI `_x.ai/billing` + Grok Web 只读 reset RPC | Grok 共享周池、重置时间、预付余额、banked reset |
+| Codex | 调用 `ccusage codex daily --json`，解析本地会话用量日志 | 通过本机 `codex app-server` 读取账户限额及 reset credits | Token 来自本地日志；额度属于登录账户 |
+| Claude Code | 调用 `ccusage claude daily --json`，解析本地 JSONL 用量日志 | 使用 Claude Code OAuth 登录态读取 usage 窗口 | Token 来自本地日志；额度包含账户总限额及接口返回的模型专属窗口 |
+| OpenCode | 只读打开 `opencode.db`，优先读取 assistant 消息级 token 字段；没有有效消息用量时回退到会话级记录 | 未接入统一账户额度接口 | 本地数据库中的用量，保留服务商和模型路由 |
+| DeepSeek Harness | 解压本地 `session.jsonl.zstd`，读取调用过程中的 usage 事件，按会话、轮次和步骤去重 | 未接入账户额度接口 | 配置目录中符合 Provider 筛选条件的本地会话 |
+| Grok | 读取本地 `updates.jsonl` 中主会话的 `turn_completed` 用量，并对重复 prompt 去重 | 不调用账户用量或额度接口 | 本机会话记录；子代理用量随主会话汇总，不再重复累加 |
+| Kimi | 解析 CLI 与桌面应用会话目录中的 `wire.jsonl`，汇总 turn 级 `usage.record` 并跨目录去重 | 分别读取 Kimi 会员 subscription stats 与 Kimi Code managed usage | Token 来自本地 CLI、桌面应用；额度来自各自登录账户 |
+| Cursor | 从本机读取登录凭据，再请求账户接口，聚合最近 90 天 usage events | 读取 Cursor usage summary 与账期 | 账户级用量，可能包含其他设备的使用记录 |
+| Grok Build | 解析本地 `updates.jsonl` 中的 `turn_completed.usage` | 通过官方 CLI `_x.ai/billing` 和 Grok Web 只读 reset RPC 获取账户信息 | Token 来自本地会话；额度包含账户共享周池、预付余额和 banked reset |
+
+首页刷新按钮会触发全数据源采集与已启用的账户同步，再重新读取账本、更新图表。采集以原工具已写入的记录或接口已返回的数据为准；尚未保存的调用用量要等下一次采集。初次接入会读取可访问的历史记录，范围受日志保留情况及接口查询期限限制。
+
+刷新时按日期合并新旧账本：新结果覆盖同一天的旧值，未出现在新结果中的历史日期继续保留。因此，删除部分原始记录后重新采集，同一天的统计可能减少。费用按模型路由和价表单独估算；已有的分时计费金额会保留。
+
+本分支同时保留 Grok 本地统计与上游 Grok Build 接入。只查看本机 Grok 用量时，可保留 `Grok`，关闭 `Grok Build` 的账户同步并隐藏其页面；页面隐藏和账户同步是独立设置。项目支持的来源与接口列在上表，实际可用情况取决于本机日志、登录状态和同步配置。
 
 ### Codex
 
@@ -318,6 +326,8 @@ Claude Code 的本地 token 明细来自 JSONL，额度窗口来自本机登录�
 
 ### Cursor Pro
 
+Cursor 的 token 明细来自账户 usage events，本地数据库用于取得登录凭据。使用共享账户时，该来源无法仅凭这些账户事件区分本机与其他设备的用量。
+
 Cursor 的旧 `plan.used / plan.limit` 使用另一套计量单位。主要额度进度采用设置页中的 `Included in Pro` 总百分比，同时展示 `Auto + Composer`、`API` 和账期。旧单位保留为诊断数据，不参与 Pro 百分比预测。
 
 ### Kimi
@@ -327,6 +337,10 @@ Kimi token 明细来自 CLI 和官方桌面应用的本地会话。统计以 tur
 桌面应用日志位于 `%APPDATA%\kimi-desktop\daimon-share\daimon\runtime\kimi-code\home\sessions`。会员月总额通过 Kimi Web 与桌面应用共用的 `GetSubscriptionStats` 接口读取，沿用桌面应用登录态。项目保存总已用比例、Code 占比和精确到时分的到期时间；“月度 Kimi”由总比例减去 Code 比例得到。Kimi Code 周额度来自 CLI managed usage 接口。CLI access token 过期后，程序通过官方 OAuth refresh 流程在本机刷新，并原子更新 Kimi 的凭证文件。
 
 两套在线额度独立同步。没有安装 Kimi Code CLI 时，会员月总额仍可从桌面应用读取；桌面应用登录态不可用时，CLI 周额度仍可单独更新。在线查询失败不影响本地每日 token 导出，面板继续使用最近一次成功的额度快照。WebUI 和项目日志只接收汇总数据，不写入 token、cookie、完整账户 ID 或会话正文。[Kimi 会员额度规则](https://www.kimi.com/zh-cn/help/membership/membership-update-rules)说明月额度按订阅周期恢复；[Kimi Code 权益说明](https://www.kimi.com/zh-cn/help/kimi-code/benefits)列出了周额度和 5 小时滚动窗口。预测页采用周额度及更长周期的口径。
+
+### OpenCode
+
+默认数据库位于 `~/.local/share/opencode/opencode.db`，可通过 `OPENCODE_DB_PATH` 指定其他位置。采集器只读查询消息表；没有有效消息用量时，才读取会话表的汇总字段。费用匹配保留服务商和完整模型路由，自定义服务商映射见 [OpenCode 计费配置](docs/opencode-billing.md)。当前接入只统计用量与费用，不生成账户额度窗口。
 
 ### DeepSeek Harness
 
@@ -622,7 +636,7 @@ usage-logs/
 
 存储策略：
 
-- 每个数据源只保留一个 token 滚动 JSON；刷新时会把旧账本与新导出按日期合并，`daily` 历史永久保留并据此重算累计 `totals`，统计与图表读取方式不变。
+- 每个数据源只保留一个 token 滚动 JSON；刷新时会把旧账本与新导出按日期合并，新结果覆盖同一天的旧值，其他历史日期保留，并据此重算累计 `totals`。Token 日账本没有按保存天数自动清理的规则；原始记录删减后再次导出，返回日期的统计仍可能减少。
 - 同一天多次刷新时，后一次导出的当日累计值替换前一次，不会把同一天重复相加；日内速率点仍由额度 `observations` 单独记录。
 - 每个有账户额度的数据源只保留一个额度 JSON，其中 `latest` 是最新状态，`history` 是最近 120 天每日快照。
 - 每个有账户额度的数据源只保留一个观测 JSON，其中 `observations` 保留最近 120 天的去重观测点和重置分段边界。120 天清理仅作用于额度拟合观测，不删除 Token 日账本。
